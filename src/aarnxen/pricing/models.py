@@ -19,10 +19,22 @@ PRICING: dict[tuple[str, str], tuple[float, float]] = {
     ("openrouter", "anthropic/claude-sonnet-4"): (3.00, 15.00),
     ("openrouter", "google/gemini-2.5-pro"): (1.25, 10.00),
     ("openrouter", "deepseek/deepseek-r1"): (0.55, 2.19),
-    # Ollama (local = free)
+    # Ollama (local = free, cloud = subscription-based, $0 per token)
     ("ollama", "llama3.2"): (0.0, 0.0),
     ("ollama-local", "llama3.2"): (0.0, 0.0),
     ("ollama-cloud", "llama3.2"): (0.0, 0.0),
+    ("ollama-cloud", "deepseek-v3.2"): (0.0, 0.0),
+    ("ollama-cloud", "qwen3.5"): (0.0, 0.0),
+    ("ollama-cloud", "qwen3-coder-next"): (0.0, 0.0),
+    ("ollama-cloud", "qwen3-next"): (0.0, 0.0),
+    ("ollama-cloud", "kimi-k2.5"): (0.0, 0.0),
+    ("ollama-cloud", "kimi-k2-thinking"): (0.0, 0.0),
+    ("ollama-cloud", "glm-5"): (0.0, 0.0),
+    ("ollama-cloud", "glm-4.7"): (0.0, 0.0),
+    ("ollama-cloud", "minimax-m2.5"): (0.0, 0.0),
+    ("ollama-cloud", "cogito-2.1"): (0.0, 0.0),
+    ("ollama-cloud", "devstral-2"): (0.0, 0.0),
+    ("ollama-cloud", "devstral-small-2"): (0.0, 0.0),
 }
 
 

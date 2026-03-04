@@ -12,9 +12,19 @@ from aarnxen.providers.registry import ProviderRegistry
 logger = logging.getLogger(__name__)
 
 TIERS = {
-    "budget": ["gemini-2.5-flash", "llama3.2", "gemini-flash", "llama-3.3-70b-versatile"],
-    "balanced": ["gemini-2.5-pro", "gpt-4o-mini", "mixtral", "llama-3.3-70b-versatile"],
-    "premium": ["gemini-2.5-pro", "gpt-4o", "claude-3-opus", "llama-3.3-70b-versatile"],
+    # Ollama Cloud models first (free per-token, subscription-based)
+    "budget": [
+        "llama3.2", "qwen3.5", "minimax-m2.5", "cogito-2.1",
+        "gemini-2.5-flash", "gemini-flash", "llama-3.3-70b-versatile",
+    ],
+    "balanced": [
+        "deepseek-v3.2", "qwen3-next", "glm-5", "kimi-k2.5",
+        "gemini-2.5-pro", "gpt-4o-mini", "mixtral",
+    ],
+    "premium": [
+        "kimi-k2-thinking", "qwen3-coder-next", "deepseek-v3.2", "devstral-2",
+        "gemini-2.5-pro", "gpt-4o", "claude-3-opus",
+    ],
 }
 
 TASK_KEYWORDS = {
