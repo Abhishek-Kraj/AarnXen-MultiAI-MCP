@@ -5,11 +5,37 @@ and reference across sessions. No external vector DB needed — uses SQLite's
 built-in FTS5 for ranked text search.
 """
 
+import math
 import sqlite3
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "it", "as", "be", "was", "are",
+    "been", "has", "have", "had", "do", "does", "did", "will", "would",
+    "could", "should", "may", "might", "can", "this", "that", "these",
+    "those", "not", "no", "if", "then", "so", "up", "out", "about",
+    "into", "over", "after", "before", "between", "under", "above",
+    "such", "each", "which", "their", "there", "than", "other", "its",
+})
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _jaccard(a, b):
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _tokenize(text):
+    return {w.lower().strip(".,;:!?\"'()[]{}") for w in text.split() if len(w) > 2}
 
 
 class KnowledgeBase:
@@ -19,6 +45,7 @@ class KnowledgeBase:
         self._conn = sqlite3.connect(str(self._path))
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._create_tables()
+        self._migrate()
 
     def _create_tables(self):
         self._conn.executescript("""
@@ -89,6 +116,28 @@ class KnowledgeBase:
             );
         """)
 
+    def _has_column(self, table, column):
+        cols = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(c[1] == column for c in cols)
+
+    def _migrate(self):
+        # Documents: importance scoring columns
+        migrations = [
+            ("documents", "importance", "REAL DEFAULT 5.0"),
+            ("documents", "access_count", "INTEGER DEFAULT 0"),
+            ("documents", "last_accessed", "TEXT DEFAULT ''"),
+            ("documents", "decay_rate", "REAL DEFAULT 1.0"),
+            ("documents", "scope", "TEXT DEFAULT 'user'"),
+            # Relations: confidence decay columns
+            ("relations", "confidence", "REAL DEFAULT 1.0"),
+            ("relations", "last_reinforced", "TEXT DEFAULT ''"),
+            ("relations", "half_life_days", "REAL DEFAULT 30.0"),
+        ]
+        for table, column, coldef in migrations:
+            if not self._has_column(table, column):
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
+        self._conn.commit()
+
     # --- Document Operations ---
 
     def store_document(
@@ -98,37 +147,109 @@ class KnowledgeBase:
         doc_type: str = "note",
         tags: str = "",
         source: str = "",
+        importance: float = 5.0,
+        scope: str = "user",
     ) -> str:
         doc_id = str(uuid.uuid4())[:8]
         now = time.time()
+        now_iso = _now_iso()
         self._conn.execute(
-            "INSERT INTO documents (id, title, content, doc_type, tags, source, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (doc_id, title, content, doc_type, tags, source, now, now),
+            "INSERT INTO documents (id, title, content, doc_type, tags, source, created_at, updated_at, "
+            "importance, access_count, last_accessed, decay_rate, scope) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1.0, ?)",
+            (doc_id, title, content, doc_type, tags, source, now, now, importance, now_iso, scope),
         )
         self._conn.commit()
         return doc_id
 
-    def search_documents(self, query: str, limit: int = 10) -> list[dict]:
-        """Full-text search using FTS5 ranking."""
-        rows = self._conn.execute(
-            "SELECT d.id, d.title, snippet(documents_fts, 1, '>>>', '<<<', '...', 64) as snippet, "
-            "d.doc_type, d.tags, d.source, rank "
-            "FROM documents_fts f "
-            "JOIN documents d ON d.rowid = f.rowid "
-            "WHERE documents_fts MATCH ? "
-            "ORDER BY rank "
-            "LIMIT ?",
-            (query, limit),
-        ).fetchall()
-        return [
-            {
-                "id": r[0], "title": r[1], "snippet": r[2],
+    def score_document(self, doc_id, query=None):
+        row = self._conn.execute(
+            "SELECT importance, access_count, last_accessed, decay_rate FROM documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+        if not row:
+            return 0.0
+        importance, access_count, last_accessed, decay_rate = row
+
+        # Relevance component
+        if query:
+            fts_row = self._conn.execute(
+                "SELECT rank FROM documents_fts f JOIN documents d ON d.rowid = f.rowid "
+                "WHERE documents_fts MATCH ? AND d.id = ?",
+                (query, doc_id),
+            ).fetchone()
+            relevance = -fts_row[0] if fts_row else 0.0
+            # Normalize: FTS5 rank is negative, closer to 0 = less relevant
+            # Clamp to [0, 1] range
+            relevance = min(relevance, 1.0)
+        else:
+            relevance = (importance or 5.0) / 10.0
+
+        # Frequency component — saturating function
+        frequency_factor = access_count / (1 + access_count)
+
+        # Recency component — exponential decay
+        if last_accessed:
+            try:
+                last_dt = datetime.fromisoformat(last_accessed.replace("Z", "+00:00"))
+                days_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 86400
+            except (ValueError, AttributeError):
+                days_since = 30.0
+        else:
+            days_since = 30.0
+        recency_factor = math.exp(-(decay_rate or 1.0) * days_since / 30)
+
+        return round(relevance * 0.4 + frequency_factor * 0.3 + recency_factor * 0.3, 4)
+
+    def search_documents(self, query: str, limit: int = 10, scope: Optional[str] = None) -> list[dict]:
+        """Full-text search using FTS5 ranking with importance scoring."""
+        if scope:
+            rows = self._conn.execute(
+                "SELECT d.id, d.title, snippet(documents_fts, 1, '>>>', '<<<', '...', 64) as snippet, "
+                "d.doc_type, d.tags, d.source, rank "
+                "FROM documents_fts f "
+                "JOIN documents d ON d.rowid = f.rowid "
+                "WHERE documents_fts MATCH ? AND d.scope = ? "
+                "LIMIT ?",
+                (query, scope, limit * 3),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT d.id, d.title, snippet(documents_fts, 1, '>>>', '<<<', '...', 64) as snippet, "
+                "d.doc_type, d.tags, d.source, rank "
+                "FROM documents_fts f "
+                "JOIN documents d ON d.rowid = f.rowid "
+                "WHERE documents_fts MATCH ? "
+                "LIMIT ?",
+                (query, limit * 3),
+            ).fetchall()
+
+        # Score each result
+        scored = []
+        for r in rows:
+            doc_id = r[0]
+            score = self.score_document(doc_id, query=query)
+            scored.append({
+                "id": doc_id, "title": r[1], "snippet": r[2],
                 "type": r[3], "tags": r[4], "source": r[5],
                 "relevance_score": round(-r[6], 3),
-            }
-            for r in rows
-        ]
+                "combined_score": score,
+            })
+
+        # Sort by combined score descending
+        scored.sort(key=lambda x: x["combined_score"], reverse=True)
+        scored = scored[:limit]
+
+        # Bump access stats for returned results
+        now_iso = _now_iso()
+        for doc in scored:
+            self._conn.execute(
+                "UPDATE documents SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                (now_iso, doc["id"]),
+            )
+        self._conn.commit()
+
+        return scored
 
     def get_document(self, doc_id: str) -> Optional[dict]:
         row = self._conn.execute(
@@ -157,6 +278,49 @@ class KnowledgeBase:
             ).fetchall()
         return [{"id": r[0], "title": r[1], "type": r[2], "tags": r[3]} for r in rows]
 
+    # --- Auto-Tagging ---
+
+    def auto_tag(self, doc_id):
+        row = self._conn.execute(
+            "SELECT title, content FROM documents WHERE id = ?", (doc_id,),
+        ).fetchone()
+        if not row:
+            return []
+        text = f"{row[0]} {row[1]}"
+        words = [w.lower().strip(".,;:!?\"'()[]{}") for w in text.split()]
+        words = [w for w in words if len(w) > 2 and w not in _STOPWORDS]
+
+        # Count frequencies
+        freq = {}
+        for w in words:
+            freq[w] = freq.get(w, 0) + 1
+        top = sorted(freq, key=freq.get, reverse=True)[:5]
+
+        tags = ",".join(top)
+        self._conn.execute("UPDATE documents SET tags = ? WHERE id = ?", (tags, doc_id))
+        self._conn.commit()
+        return top
+
+    def search_by_tag(self, tag, limit=20):
+        rows = self._conn.execute(
+            "SELECT id, title, doc_type, tags, source FROM documents "
+            "WHERE ',' || tags || ',' LIKE ? ORDER BY updated_at DESC LIMIT ?",
+            (f"%,{tag},%", limit),
+        ).fetchall()
+        # Also match tags at start/end
+        rows2 = self._conn.execute(
+            "SELECT id, title, doc_type, tags, source FROM documents "
+            "WHERE tags LIKE ? OR tags LIKE ? OR tags = ? ORDER BY updated_at DESC LIMIT ?",
+            (f"{tag},%", f"%,{tag}", tag, limit),
+        ).fetchall()
+        seen = set()
+        results = []
+        for r in list(rows) + list(rows2):
+            if r[0] not in seen:
+                seen.add(r[0])
+                results.append({"id": r[0], "title": r[1], "type": r[2], "tags": r[3], "source": r[4]})
+        return results[:limit]
+
     # --- Entity Operations ---
 
     def add_entity(self, name: str, entity_type: str = "concept", description: str = "") -> str:
@@ -177,12 +341,56 @@ class KnowledgeBase:
         to_id = self._conn.execute("SELECT id FROM entities WHERE name = ?", (to_name,)).fetchone()[0]
 
         rid = str(uuid.uuid4())[:8]
+        now_iso = _now_iso()
         self._conn.execute(
-            "INSERT INTO relations (id, from_entity, to_entity, relation_type, created_at) VALUES (?, ?, ?, ?, ?)",
-            (rid, from_id, to_id, relation_type, time.time()),
+            "INSERT INTO relations (id, from_entity, to_entity, relation_type, created_at, "
+            "confidence, last_reinforced, half_life_days) VALUES (?, ?, ?, ?, ?, 1.0, ?, 30.0)",
+            (rid, from_id, to_id, relation_type, time.time(), now_iso),
         )
         self._conn.commit()
         return rid
+
+    def reinforce_relation(self, relation_id):
+        now_iso = _now_iso()
+        self._conn.execute(
+            "UPDATE relations SET confidence = 1.0, last_reinforced = ? WHERE id = ?",
+            (now_iso, relation_id),
+        )
+        self._conn.commit()
+
+    def _effective_confidence(self, confidence, last_reinforced, half_life_days):
+        if not last_reinforced:
+            return confidence
+        try:
+            last_dt = datetime.fromisoformat(last_reinforced.replace("Z", "+00:00"))
+            days_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 86400
+        except (ValueError, AttributeError):
+            return confidence
+        half_life = half_life_days or 30.0
+        return confidence * (0.5 ** (days_since / half_life))
+
+    def get_relations_with_decay(self, entity_name):
+        eid_row = self._conn.execute("SELECT id FROM entities WHERE name = ?", (entity_name,)).fetchone()
+        if not eid_row:
+            return []
+        eid = eid_row[0]
+        rows = self._conn.execute(
+            "SELECT rel.id, e2.name, rel.relation_type, rel.confidence, rel.last_reinforced, rel.half_life_days "
+            "FROM relations rel "
+            "JOIN entities e2 ON e2.id = rel.to_entity "
+            "WHERE rel.from_entity = ?",
+            (eid,),
+        ).fetchall()
+        results = []
+        for r in rows:
+            eff = self._effective_confidence(r[3] or 1.0, r[4], r[5] or 30.0)
+            if eff >= 0.1:
+                results.append({
+                    "id": r[0], "to": r[1], "type": r[2],
+                    "confidence": round(r[3] or 1.0, 3),
+                    "effective_confidence": round(eff, 3),
+                })
+        return results
 
     def add_observation(self, entity_name: str, content: str) -> str:
         self.add_entity(entity_name)
@@ -220,6 +428,80 @@ class KnowledgeBase:
                 "relations": [{"to": rel[0], "type": rel[1]} for rel in rels],
             })
         return results
+
+    # --- Memory Deduplication & Consolidation ---
+
+    def deduplicate(self, similarity_threshold=0.8):
+        rows = self._conn.execute(
+            "SELECT id, title, content, importance FROM documents ORDER BY importance DESC",
+        ).fetchall()
+
+        merged_count = 0
+        deleted_ids = set()
+
+        for i in range(len(rows)):
+            if rows[i][0] in deleted_ids:
+                continue
+            tokens_i = _tokenize(f"{rows[i][1]} {rows[i][2]}")
+            for j in range(i + 1, len(rows)):
+                if rows[j][0] in deleted_ids:
+                    continue
+                tokens_j = _tokenize(f"{rows[j][1]} {rows[j][2]}")
+                sim = _jaccard(tokens_i, tokens_j)
+                if sim >= similarity_threshold:
+                    # Keep rows[i] (higher importance due to ORDER BY), merge content from rows[j]
+                    keep_id = rows[i][0]
+                    drop_id = rows[j][0]
+                    # Append unique content from the duplicate
+                    keep_doc = self.get_document(keep_id)
+                    drop_doc = self.get_document(drop_id)
+                    if keep_doc and drop_doc:
+                        keep_words = set(keep_doc["content"].split())
+                        drop_words = drop_doc["content"].split()
+                        unique = [w for w in drop_words if w not in keep_words]
+                        if unique:
+                            merged_content = keep_doc["content"] + " " + " ".join(unique)
+                            self._conn.execute(
+                                "UPDATE documents SET content = ?, updated_at = ? WHERE id = ?",
+                                (merged_content, time.time(), keep_id),
+                            )
+                    self._conn.execute("DELETE FROM documents WHERE id = ?", (drop_id,))
+                    deleted_ids.add(drop_id)
+                    merged_count += 1
+
+        self._conn.commit()
+        return merged_count
+
+    def consolidate(self):
+        # Run deduplication
+        merged = self.deduplicate()
+
+        # Decay all relation confidences and remove very weak ones
+        rows = self._conn.execute(
+            "SELECT id, confidence, last_reinforced, half_life_days FROM relations",
+        ).fetchall()
+        removed_relations = 0
+        for r in rows:
+            eff = self._effective_confidence(r[1] or 1.0, r[2], r[3] or 30.0)
+            if eff < 0.05:
+                self._conn.execute("DELETE FROM relations WHERE id = ?", (r[0],))
+                removed_relations += 1
+
+        # Remove old observations with no reinforcement (>90 days)
+        cutoff = time.time() - (90 * 86400)
+        cursor = self._conn.execute(
+            "DELETE FROM observations WHERE created_at < ?", (cutoff,),
+        )
+        removed_observations = cursor.rowcount
+
+        self._conn.commit()
+        return {
+            "merged_documents": merged,
+            "removed_relations": removed_relations,
+            "removed_observations": removed_observations,
+        }
+
+    # --- Stats ---
 
     def stats(self) -> dict:
         docs = self._conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]

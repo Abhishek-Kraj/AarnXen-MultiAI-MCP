@@ -10,8 +10,10 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from aarnxen.config import AarnXenConfig, load_config
 from aarnxen.core.cache import ResponseCache
+from aarnxen.core.circuit_breaker import CircuitBreaker
 from aarnxen.core.conversation import ConversationMemory
 from aarnxen.core.cost import CostTracker
+from aarnxen.core.extractor import EntityExtractor
 from aarnxen.core.knowledge import KnowledgeBase
 from aarnxen.providers.registry import ProviderRegistry
 
@@ -25,6 +27,8 @@ class AppContext:
     cost_tracker: CostTracker
     memory: Optional[ConversationMemory]
     knowledge: Optional[KnowledgeBase]
+    circuit_breaker: CircuitBreaker
+    extractor: EntityExtractor
     config: AarnXenConfig
 
 
@@ -48,6 +52,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         memory = ConversationMemory(persist_path=cfg.memory.path)
 
     knowledge = KnowledgeBase()
+    circuit_breaker = CircuitBreaker()
+    extractor = EntityExtractor(knowledge_base=knowledge)
 
     try:
         yield AppContext(
@@ -56,6 +62,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             cost_tracker=cost_tracker,
             memory=memory,
             knowledge=knowledge,
+            circuit_breaker=circuit_breaker,
+            extractor=extractor,
             config=cfg,
         )
     finally:
@@ -94,10 +102,11 @@ async def chat(
     temperature: float = 0.7,
     system_prompt: str = "",
     conversation_id: str = "",
+    cascade: bool = False,
     ctx: Context = None,
 ) -> dict:
-    """Chat with any AI model."""
-    return await chat_handler(prompt, model, temperature, system_prompt, conversation_id, ctx)
+    """Chat with any AI model. Set cascade=True for smart routing (tries cheap model first, escalates if needed)."""
+    return await chat_handler(prompt, model, temperature, system_prompt, conversation_id, cascade, ctx)
 
 
 @mcp.tool()
@@ -159,6 +168,20 @@ async def list_models(ctx: Context = None) -> dict:
     """List all available models across all providers."""
     deps = ctx.request_context.lifespan_context
     return {"models": deps.registry.list_all_models()}
+
+
+@mcp.tool()
+async def provider_health(ctx: Context = None) -> dict:
+    """Show circuit breaker health status for all AI providers."""
+    deps = ctx.request_context.lifespan_context
+    return deps.circuit_breaker.get_all_status()
+
+
+@mcp.tool()
+async def kb_consolidate(ctx: Context = None) -> dict:
+    """Run memory maintenance: deduplicate, decay old relations, prune stale data."""
+    deps = ctx.request_context.lifespan_context
+    return deps.knowledge.consolidate()
 
 
 # --- Knowledge Base Tools ---
