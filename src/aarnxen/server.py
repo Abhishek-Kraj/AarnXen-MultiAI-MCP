@@ -105,6 +105,7 @@ from aarnxen.tools.knowledge import (  # noqa: E402
     kb_store_handler,
 )
 from aarnxen.tools.challenge import challenge_handler  # noqa: E402
+from aarnxen.tools.pipeline import pipeline_handler  # noqa: E402
 from aarnxen.tools.precommit import precommit_handler  # noqa: E402
 from aarnxen.tools.think import think_handler  # noqa: E402
 
@@ -190,6 +191,15 @@ async def challenge(
 ) -> dict:
     """Challenge a claim or approach with critical analysis from another AI model. Use when you want to stress-test your reasoning, find flaws in a plan, or get a devil's advocate perspective before proceeding. Returns STRONG/MODERATE/WEAK verdict."""
     return await challenge_handler(claim, evidence, model, ctx)
+
+
+@mcp.tool()
+async def pipeline(
+    steps: str,
+    ctx: Context = None,
+) -> dict:
+    """Execute a pipeline of AarnXen tools in sequence. Each step's output feeds the next via $PREV. Example: [{"tool": "think", "args": {"prompt": "analyze X", "depth": "deep"}}, {"tool": "challenge", "args": {"claim": "$PREV"}}]. Available tools: chat, think, challenge, codereview, precommit."""
+    return await pipeline_handler(steps, ctx)
 
 
 @mcp.tool()

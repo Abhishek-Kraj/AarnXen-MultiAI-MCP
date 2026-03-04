@@ -4,10 +4,22 @@ import logging
 
 from mcp.server.fastmcp import Context
 
+from aarnxen.core.errors import generation_failed, rate_limit_error
 from aarnxen.core.extractor import EntityExtractor
 from aarnxen.core.router import SmartRouter
 
 logger = logging.getLogger("aarnxen")
+
+
+async def _log(ctx, level, msg):
+    if not ctx:
+        return
+    try:
+        fn = getattr(ctx, level, None)
+        if fn:
+            await fn(msg)
+    except Exception:
+        pass
 
 
 async def chat_handler(
@@ -38,9 +50,16 @@ async def chat_handler(
     # Smart cascade mode: classify, route, escalate if needed
     if cascade and (not model or model == "auto"):
         router = SmartRouter(registry)
-        result = await router.cascade(
-            prompt, system_prompt=system_prompt or None, temperature=temperature,
-        )
+        try:
+            result = await router.cascade(
+                prompt, system_prompt=system_prompt or None, temperature=temperature,
+            )
+        except Exception as exc:
+            error_str = str(exc)
+            alts = [m["model"] for m in registry.list_all_models()[:5]]
+            if "429" in error_str or "rate" in error_str.lower():
+                return rate_limit_error("auto (cascade)", alternatives=alts)
+            return generation_failed("auto", "cascade", error_str, alternatives=alts)
 
         cost_entry = cost_tracker.record(
             result["provider"], result["model"],
@@ -79,6 +98,7 @@ async def chat_handler(
     if cache:
         cached = cache.get(provider.provider_name(), resolved_model, prompt, system_prompt, temperature)
         if cached:
+            await _log(ctx, "debug", f"Cache hit for {resolved_model}")
             cost_tracker.record(
                 provider.provider_name(), resolved_model,
                 cached.input_tokens, cached.output_tokens, cached=True,
@@ -99,11 +119,22 @@ async def chat_handler(
             context_lines = [f"[{m['role']}]: {m['content']}" for m in history[-10:]]
             full_prompt = "Previous conversation:\n" + "\n".join(context_lines) + f"\n\nNew message: {prompt}"
 
-    response = await provider.generate(
-        full_prompt, resolved_model,
-        system_prompt=system_prompt or None,
-        temperature=temperature,
-    )
+    await _log(ctx, "info", f"Routing to {provider.provider_name()}/{resolved_model}")
+    try:
+        response = await provider.generate(
+            full_prompt, resolved_model,
+            system_prompt=system_prompt or None,
+            temperature=temperature,
+        )
+    except Exception as exc:
+        error_str = str(exc)
+        alts = [m["model"] for m in registry.list_all_models()[:5]]
+        if "429" in error_str or "rate" in error_str.lower():
+            return rate_limit_error(provider.provider_name(), alternatives=alts)
+        return generation_failed(
+            provider.provider_name(), resolved_model, error_str, alternatives=alts,
+        )
+    await _log(ctx, "info", f"Response: {len(response.text)} chars, {response.latency_ms:.0f}ms")
 
     # Cache and track
     if cache:

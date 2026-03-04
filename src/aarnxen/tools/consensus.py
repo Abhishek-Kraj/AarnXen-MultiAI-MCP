@@ -82,8 +82,13 @@ async def consensus_handler(
         }
 
     # Fire all queries in parallel
+    total = len(model_pairs)
+    if ctx:
+        await ctx.report_progress(0, total, "Starting consensus...")
     tasks = [query_one(i, pname, mid) for i, (pname, mid) in enumerate(model_pairs)]
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    if ctx:
+        await ctx.report_progress(total, total, "All models responded")
 
     responses = []
     errors = []

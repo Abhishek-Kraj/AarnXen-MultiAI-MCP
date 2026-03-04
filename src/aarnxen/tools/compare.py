@@ -54,11 +54,15 @@ async def compare_handler(
             "latency_ms": round(response.latency_ms, 1),
         }
 
+    if ctx:
+        await ctx.report_progress(0, 2, "Starting comparison...")
     result_a, result_b = await asyncio.gather(
         query(model_a, "Model A"),
         query(model_b, "Model B"),
         return_exceptions=False,
     )
+    if ctx:
+        await ctx.report_progress(2, 2, "Both models responded")
 
     return {
         "prompt": prompt,

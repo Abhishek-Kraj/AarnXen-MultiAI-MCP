@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 from typing import TYPE_CHECKING, Optional
 
 from aarnxen.providers.base import BaseProvider, ModelResponse
@@ -51,7 +52,7 @@ async def call_with_retry(
                 if circuit_breaker:
                     circuit_breaker.record_failure(primary_name)
                 if attempt < max_retries - 1:
-                    delay = min(base_delay * (2**attempt), max_delay)
+                    delay = min(base_delay * (2**attempt), max_delay) * (0.5 + random.random())
                     logger.warning(
                         "%s/%s attempt %d/%d failed: %s. Retrying in %.1fs",
                         primary_name, model, attempt + 1, max_retries, e, delay,

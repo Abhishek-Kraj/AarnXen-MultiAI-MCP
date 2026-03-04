@@ -2,6 +2,49 @@
 
 from mcp.server.fastmcp import Context
 
+DEPTH_CONFIG = {
+    "light": {
+        "temperature": 0.5,
+        "max_tokens": 1000,
+        "system_prompt": (
+            "Provide a brief, focused analysis. Hit the key points quickly. "
+            "Skip obvious details — focus on what matters most."
+        ),
+    },
+    "medium": {
+        "temperature": 0.7,
+        "max_tokens": 4000,
+        "system_prompt": (
+            "Analyze this step by step. Consider multiple angles. "
+            "Structure your response with clear sections. "
+            "Identify trade-offs and make a recommendation."
+        ),
+    },
+    "deep": {
+        "temperature": 0.8,
+        "max_tokens": 8000,
+        "system_prompt": (
+            "Perform a thorough, exhaustive analysis. Consider every angle: "
+            "assumptions, edge cases, second-order effects, historical parallels. "
+            "Challenge your own reasoning. Present both the strongest argument "
+            "and the strongest counter-argument. Structure with: "
+            "1) Problem decomposition 2) Analysis of each component "
+            "3) Synthesis 4) Risks and unknowns 5) Final recommendation with confidence level."
+        ),
+    },
+}
+
+DEPTH_ALIASES = {
+    "l": "light", "1": "light", "quick": "light", "shallow": "light",
+    "m": "medium", "2": "medium", "normal": "medium", "default": "medium",
+    "d": "deep", "3": "deep", "thorough": "deep", "extended": "deep",
+}
+
+
+def _resolve_depth(depth: str) -> str:
+    depth = depth.lower().strip()
+    return DEPTH_ALIASES.get(depth, depth) if depth not in DEPTH_CONFIG else depth
+
 
 async def think_handler(
     prompt: str,
@@ -22,23 +65,15 @@ async def think_handler(
 
     provider, resolved_model = registry.resolve(model)
 
-    depth_configs = {
-        "light": {"max_tokens": 2048, "temp": 0.3},
-        "medium": {"max_tokens": 4096, "temp": 0.5},
-        "deep": {"max_tokens": 8192, "temp": 0.7},
-    }
-    config = depth_configs.get(depth, depth_configs["medium"])
+    depth = _resolve_depth(depth)
+    config = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["medium"])
 
-    system_prompt = (
-        "You are a deep reasoning assistant. Think step-by-step through this problem. "
-        "Break it into parts, consider edge cases, evaluate trade-offs, and arrive at a "
-        "well-reasoned conclusion. Show your reasoning process clearly."
-    )
+    system_prompt = config["system_prompt"]
 
     response = await provider.generate(
         prompt, resolved_model,
         system_prompt=system_prompt,
-        temperature=config["temp"],
+        temperature=config["temperature"],
         max_tokens=config["max_tokens"],
     )
 
