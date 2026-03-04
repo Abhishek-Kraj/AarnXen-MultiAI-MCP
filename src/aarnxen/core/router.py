@@ -13,16 +13,22 @@ logger = logging.getLogger(__name__)
 
 TIERS = {
     # Ollama Cloud models first (free per-token, subscription-based)
+    # Budget: fast, lightweight — good for simple Q&A, greetings, short answers
     "budget": [
-        "llama3.2", "qwen3.5", "minimax-m2.5", "cogito-2.1",
-        "gemini-2.5-flash", "gemini-flash", "llama-3.3-70b-versatile",
+        "qwen3.5", "llama3.2", "cogito-2.1", "ministral-3",
+        "gemini-2.5-flash", "llama-3.3-70b-versatile",
     ],
+    # Balanced: strong general-purpose — good for creative, general knowledge
     "balanced": [
-        "deepseek-v3.2", "qwen3-next", "glm-5", "kimi-k2.5",
+        "kimi-k2.5", "qwen3-next", "glm-4.7", "deepseek-v3.2",
         "gemini-2.5-pro", "gpt-4o-mini", "mixtral",
     ],
+    # Premium: frontier-class — for coding, reasoning, complex analysis
+    # GLM-5: 77.8% SWE-bench, 92.7% AIME | MiniMax M2.5: 80.2% SWE-bench
+    # Kimi K2 Thinking: 100% AIME | DeepSeek V3.2: "comparable to GPT-5"
     "premium": [
-        "kimi-k2-thinking", "qwen3-coder-next", "deepseek-v3.2", "devstral-2",
+        "glm-5", "minimax-m2.5", "kimi-k2-thinking", "deepseek-v3.2",
+        "qwen3-coder-next", "devstral-2",
         "gemini-2.5-pro", "gpt-4o", "claude-3-opus",
     ],
 }

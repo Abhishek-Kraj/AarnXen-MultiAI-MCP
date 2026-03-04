@@ -19,21 +19,24 @@ logger = logging.getLogger(__name__)
 # Well-known Ollama Cloud models with context sizes.
 # Used as fallback when /api/tags is unreachable.
 CLOUD_MODELS: dict[str, int] = {
-    "deepseek-v3.2": 128_000,
-    "qwen3.5": 128_000,
-    "qwen3-coder-next": 128_000,
-    "qwen3-next": 128_000,
-    "qwen3-vl": 128_000,
+    # Premium tier — frontier-class models
+    "glm-5": 128_000,            # 744B MoE (40B active), 92.7% AIME, 77.8% SWE-bench
+    "minimax-m2.5": 198_000,     # 80.2% SWE-bench (Claude Opus-class), 10+ languages
+    "kimi-k2-thinking": 256_000, # 100% AIME 2025, 256K ctx, 200-300 tool calls
+    "deepseek-v3.2": 160_000,    # "comparable to GPT-5", agent-focused
+    "qwen3-coder-next": 256_000, # 80B MoE (3B active), 256K ctx, agentic coding
+    "devstral-2": 128_000,       # Mistral coding specialist
+    # Balanced tier — strong general-purpose
     "kimi-k2.5": 128_000,
-    "kimi-k2-thinking": 128_000,
-    "glm-5": 128_000,
+    "qwen3-next": 128_000,
     "glm-4.7": 128_000,
     "glm-4.6": 128_000,
-    "minimax-m2.5": 128_000,
     "minimax-m2": 128_000,
     "minimax-m2.1": 128_000,
     "cogito-2.1": 128_000,
-    "devstral-2": 128_000,
+    "qwen3.5": 128_000,
+    # Budget / lightweight
+    "qwen3-vl": 128_000,         # Vision-language
     "devstral-small-2": 128_000,
     "nemotron-3-nano": 128_000,
     "rnj-1": 128_000,
