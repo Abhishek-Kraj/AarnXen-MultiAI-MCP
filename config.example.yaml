@@ -1,0 +1,56 @@
+# AarnXen Multi-AI MCP Server Configuration
+# Copy to ~/.aarnxen/config.yaml and fill in your API keys
+
+default_model: "auto"
+default_temperature: 0.7
+log_level: "INFO"
+
+providers:
+  - name: gemini
+    api_key_env: GEMINI_API_KEY
+    priority: 1
+    models: [gemini-2.5-pro, gemini-2.5-flash]
+    timeout_seconds: 120
+
+  - name: ollama-cloud
+    base_url: "https://ollama.com"
+    api_key_env: OLLAMA_CLOUD_KEY
+    priority: 2
+    models: [llama3.2]
+    timeout_seconds: 180
+
+  - name: ollama-local
+    base_url: "http://localhost:11434"
+    priority: 10
+    models: []  # auto-discover from running Ollama
+    timeout_seconds: 300
+
+  - name: openai
+    api_key_env: OPENAI_API_KEY
+    priority: 3
+    models: [gpt-4o, o3]
+    timeout_seconds: 90
+
+  - name: groq
+    api_key_env: GROQ_API_KEY
+    priority: 4
+    models: [llama-3.3-70b-versatile, mixtral-8x7b-32768]
+    timeout_seconds: 30
+
+  - name: openrouter
+    api_key_env: OPENROUTER_API_KEY
+    priority: 5
+    models: []  # all available
+    timeout_seconds: 120
+
+cache:
+  enabled: true
+  max_size: 200
+  ttl_seconds: 3600
+
+memory:
+  enabled: true
+  path: "~/.aarnxen/conversations.db"
+  max_turns: 50
+
+cost_tracking: true
