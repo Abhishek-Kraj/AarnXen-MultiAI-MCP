@@ -1,6 +1,7 @@
 """AarnXen Multi-AI MCP Server — entry point."""
 
 import logging
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -61,6 +62,21 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     router = SmartRouter(registry, circuit_breaker=circuit_breaker)
     event_bus = EventBus()
 
+    # Auto-start dashboard web UI in background thread
+    dashboard_server = None
+    try:
+        from aarnxen.dashboard import DashboardHandler, DB_PATH, PORT
+        from http.server import HTTPServer
+        if DB_PATH.exists():
+            dashboard_server = HTTPServer(("127.0.0.1", PORT), DashboardHandler)
+            dashboard_thread = threading.Thread(
+                target=dashboard_server.serve_forever, daemon=True
+            )
+            dashboard_thread.start()
+            logger.info("Dashboard running at http://localhost:%d", PORT)
+    except Exception as e:
+        logger.debug("Dashboard not started: %s", e)
+
     try:
         yield AppContext(
             registry=registry,
@@ -75,6 +91,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             config=cfg,
         )
     finally:
+        if dashboard_server:
+            dashboard_server.shutdown()
         if memory:
             memory.close()
         knowledge.close()
