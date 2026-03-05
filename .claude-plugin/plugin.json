@@ -1,0 +1,17 @@
+{
+  "name": "aarnxen-memory",
+  "version": "1.0.0",
+  "description": "Auto-memory system for AarnXen Multi-AI MCP — automatically captures session observations, decisions, and discoveries into the knowledge base",
+  "author": {
+    "name": "Abhishek"
+  },
+  "repository": "https://github.com/Abhishek-Kraj/AarnXen-MultiAI-MCP",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "auto-capture",
+    "knowledge-base",
+    "hooks",
+    "mcp"
+  ]
+}

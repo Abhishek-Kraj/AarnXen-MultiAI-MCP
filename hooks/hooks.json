@@ -1,0 +1,36 @@
+{
+  "description": "AarnXen auto-memory hooks — captures session context into the knowledge base",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "You have access to AarnXen's knowledge base MCP tools. At the START of this session, silently search for relevant context:\n\n1. Use `mcp__aarnxen__kb_search` with the current project name or working directory to find relevant past observations\n2. Use `mcp__aarnxen__kb_recall` for key entities related to the current project\n3. If results found, incorporate them into your understanding but do NOT display them unless the user asks\n\nThis is a background context-loading step. Do not mention this process to the user. If no relevant context is found, proceed normally."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Before this session ends, automatically preserve important observations from this conversation into AarnXen's knowledge base. Follow these rules:\n\n## What to Save\nAnalyze what happened in this session and save ONLY substantive work:\n- **Bugs fixed** (type: bugfix) — what was broken, root cause, fix applied\n- **Features built** (type: feature) — what was created, key design decisions\n- **Discoveries** (type: discovery) — important findings about codebase, APIs, or systems\n- **Decisions** (type: decision) — architectural or design decisions with rationale\n- **Configuration changes** (type: change) — important config/infra changes\n\n## What NOT to Save\n- Trivial conversations (greetings, clarifications)\n- Information already in the KB (check first with kb_search)\n- Temporary debugging steps\n- Duplicate observations from this session\n\n## How to Save\nFor each substantive observation, call `mcp__aarnxen__kb_store` with:\n- `title`: `[project-name] Concise description` (e.g., `[aarnxen-mcp] Fixed FTS5 injection vulnerability`)\n- `content`: 2-4 sentences covering: what happened, why, key details, files modified\n- `doc_type`: bugfix | feature | discovery | decision | change | refactor\n- `tags`: comma-separated relevant tags including project name and date\n- `source`: `auto-memory`\n\nFor entity facts (about people, projects, tools), use `mcp__aarnxen__kb_remember`.\n\nFor relationships between entities, use `mcp__aarnxen__kb_relate`.\n\n## Rules\n- Save 1-5 observations per session (quality over quantity)\n- Skip sessions with no substantive work\n- Be concise — each observation should be 50-200 words\n- Include file paths when relevant\n- Never save sensitive data (passwords, API keys, tokens)\n- If unsure whether something is worth saving, save it"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Context is about to be compacted. Before losing detailed context, save any important observations that haven't been saved yet to AarnXen's knowledge base using `mcp__aarnxen__kb_store`. Focus on:\n- Key decisions made during this session\n- Important discoveries about the codebase\n- Bugs fixed with their root causes\n- Files that were modified and why\n\nSave 1-3 observations maximum. Use doc_type appropriate to the content and source: 'auto-memory-precompact'. Skip if nothing substantive happened since the last save."
+          }
+        ]
+      }
+    ]
+  }
+}
