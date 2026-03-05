@@ -34,13 +34,22 @@ class OpenAICompatProvider(BaseProvider):
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
+        images: Optional[list[dict]] = None,
     ) -> ModelResponse:
         start = time.monotonic()
 
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+
+        if images:
+            content = [{"type": "text", "text": prompt}]
+            for img in images:
+                if isinstance(img, dict) and img.get("url"):
+                    content.append({"type": "image_url", "image_url": {"url": img["url"]}})
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": prompt})
 
         kwargs = {
             "model": model,

@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.27.0",
     "pydantic>=2.0.0",
     "pyyaml>=6.0",
+    "duckduckgo-search>=7.0.0",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +20,7 @@ vectors = ["sentence-transformers>=3.0.0"]
 
 [project.scripts]
 aarnxen = "aarnxen.server:main"
+ax = "aarnxen.server:main"
 aarnxen-dashboard = "aarnxen.dashboard:main"
 
 [build-system]

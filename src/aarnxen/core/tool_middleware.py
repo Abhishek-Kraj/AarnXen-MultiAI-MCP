@@ -20,6 +20,8 @@ def tool_wrapper(handler: Callable, tool_name: str) -> Callable:
 
     @wraps(handler)
     async def wrapped(*args, ctx=None, **kwargs):
+        if ctx is None:
+            raise ValueError(f"Context (ctx) is required for tool '{tool_name}'")
         deps = ctx.request_context.lifespan_context
         event_bus = deps.event_bus
         rate_limiter = deps.rate_limiter
@@ -73,6 +75,21 @@ def tool_wrapper(handler: Callable, tool_name: str) -> Callable:
         # 5. Emit completion event
         elapsed = round((time.monotonic() - start) * 1000, 1)
         await event_bus.emit("tool_complete", {"tool": tool_name, "latency_ms": elapsed})
+
+        # 6. Auto-learn: store model performance in KB (fire-and-forget)
+        if isinstance(result, dict) and result.get("model"):
+            try:
+                knowledge = getattr(deps, "knowledge", None)
+                if knowledge:
+                    model = result["model"]
+                    perf = (
+                        f"model={model} latency={result.get('latency_ms', elapsed):.0f}ms "
+                        f"in={result.get('input_tokens', 0)} out={result.get('output_tokens', 0)} "
+                        f"cost=${result.get('cost_usd', 0):.6f} tool={tool_name}"
+                    )
+                    knowledge.add_observation(model, perf, obs_type="model_performance")
+            except Exception as exc:
+                logger.debug("Auto-learn failed for %s: %s", tool_name, exc)
 
         return result
 

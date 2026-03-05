@@ -41,6 +41,13 @@ CLOUD_MODELS: dict[str, int] = {
     "rnj-1:8b-cloud": 32_000,              # needs :cloud tag
     "ministral-3:8b-cloud": 256_000,       # needs :cloud tag
     "gemini-3-flash-preview:latest": 128_000,
+    # New models (added 2026-03-05)
+    "gpt-oss:20b-cloud": 128_000,           # OpenAI open-source, dense, web search
+    "gpt-oss:120b-cloud": 128_000,          # OpenAI open-source, dense, reasoning
+    "qwen3-vl:235b-cloud": 256_000,         # Vision-language, GUI agent, video
+    "mistral-large-3:675b-cloud": 256_000,  # MoE/41B active, vision + multilingual
+    "deepseek-v3.1:671b-cloud": 128_000,    # MoE/37B active, hybrid thinking
+    "kimi-k2:1t-cloud": 256_000,            # 1T MoE/32B active, state-of-art
 }
 
 
@@ -82,13 +89,21 @@ class OllamaProvider(BaseProvider):
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
+        images: Optional[list[dict]] = None,
     ) -> ModelResponse:
         start = time.monotonic()
 
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+
+        if images:
+            user_msg = {"role": "user", "content": prompt, "images": [
+                img.get("data", img.get("url", "")) for img in images if isinstance(img, dict)
+            ]}
+        else:
+            user_msg = {"role": "user", "content": prompt}
+        messages.append(user_msg)
 
         body = {
             "model": model,

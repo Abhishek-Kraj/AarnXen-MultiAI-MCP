@@ -6,17 +6,40 @@ import logging
 from mcp.server.fastmcp import Context
 
 from aarnxen.core.validation import validate_json_input
+from aarnxen.core.tool_middleware import tool_wrapper
 
 logger = logging.getLogger(__name__)
 
-# Map tool names to their handler functions and required args
-TOOL_REGISTRY = {
+# Map tool names to their (module_path, handler_name) for lazy loading
+_TOOL_SOURCES = {
     "chat": ("aarnxen.tools.chat", "chat_handler"),
     "think": ("aarnxen.tools.think", "think_handler"),
     "challenge": ("aarnxen.tools.challenge", "challenge_handler"),
     "codereview": ("aarnxen.tools.codereview", "codereview_handler"),
     "precommit": ("aarnxen.tools.precommit", "precommit_handler"),
+    "web_search": ("aarnxen.tools.web_search", "web_search_handler"),
+    "web_fetch": ("aarnxen.tools.web_fetch", "web_fetch_handler"),
+    "debate": ("aarnxen.tools.debate", "debate_handler"),
+    "verify": ("aarnxen.tools.verify", "verify_handler"),
+    "jury": ("aarnxen.tools.jury", "jury_handler"),
+    "refine": ("aarnxen.tools.refine", "refine_handler"),
 }
+
+# Cache of wrapped handlers (loaded on first use)
+_wrapped_cache: dict = {}
+
+
+def _get_wrapped_handler(tool_name: str):
+    """Get a middleware-wrapped handler for a tool, caching on first load."""
+    if tool_name not in _wrapped_cache:
+        module_path, handler_name = _TOOL_SOURCES[tool_name]
+        module = __import__(module_path, fromlist=[handler_name])
+        handler = getattr(module, handler_name)
+        _wrapped_cache[tool_name] = tool_wrapper(handler, f"pipeline.{tool_name}")
+    return _wrapped_cache[tool_name]
+
+
+TOOL_REGISTRY = _TOOL_SOURCES  # Exposed for tests and tool listing
 
 
 def _extract_text(result: dict) -> str:
@@ -68,10 +91,8 @@ async def pipeline_handler(
             else:
                 resolved_args[k] = v
 
-        # Import and call the handler
-        module_path, handler_name = TOOL_REGISTRY[tool_name]
-        module = __import__(module_path, fromlist=[handler_name])
-        handler = getattr(module, handler_name)
+        # Get wrapped handler (with middleware: rate limiting, guardrails, events)
+        handler = _get_wrapped_handler(tool_name)
 
         # Add ctx to args
         resolved_args["ctx"] = ctx

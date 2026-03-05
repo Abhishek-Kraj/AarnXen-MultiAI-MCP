@@ -32,12 +32,18 @@ class MemoryConfig(BaseModel):
     max_turns: int = 50
 
 
+class RateLimitConfig(BaseModel):
+    max_calls: int = 60
+    window_seconds: float = 60.0
+
+
 class AarnXenConfig(BaseModel):
     providers: list[ProviderConfig] = Field(default_factory=list)
     default_model: str = "auto"
     default_temperature: float = 0.7
     cache: CacheConfig = CacheConfig()
     memory: MemoryConfig = MemoryConfig()
+    rate_limit: RateLimitConfig = RateLimitConfig()
     cost_tracking: bool = True
     log_level: str = "INFO"
 
@@ -83,8 +89,6 @@ def _add_env_providers(cfg: AarnXenConfig) -> None:
     if cfg.providers:
         return
 
-    existing = {p.name for p in cfg.providers}
-
     env_providers = [
         ("gemini", "GEMINI_API_KEY", 1, ["gemini-2.5-flash", "gemini-2.5-pro"]),
         ("openai", "OPENAI_API_KEY", 2, ["gpt-4o"]),
@@ -93,7 +97,7 @@ def _add_env_providers(cfg: AarnXenConfig) -> None:
     ]
 
     for name, env_key, priority, models in env_providers:
-        if name not in existing and os.environ.get(env_key):
+        if os.environ.get(env_key):
             cfg.providers.append(
                 ProviderConfig(
                     name=name,

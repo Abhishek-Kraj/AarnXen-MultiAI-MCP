@@ -126,6 +126,30 @@ async def test_middleware_guardrails_block():
 
 
 @pytest.mark.asyncio
+async def test_middleware_auto_learns_model_performance():
+    """When a tool returns a result with 'model', middleware stores performance in KB."""
+    kb = MagicMock()
+    deps = FakeDeps(
+        event_bus=EventBus(),
+        guardrails=None,
+        rate_limiter=None,
+    )
+    deps.knowledge = kb
+    ctx = FakeCtx(deps)
+
+    async def handler(prompt, ctx=None):
+        return {"model": "test-model", "latency_ms": 150, "input_tokens": 10, "output_tokens": 50, "cost_usd": 0.001}
+
+    wrapped = tool_wrapper(handler, "chat")
+    await wrapped("test prompt here", ctx=ctx)
+
+    kb.add_observation.assert_called_once()
+    args = kb.add_observation.call_args
+    assert args[0][0] == "test-model"
+    assert "model_performance" in str(args)
+
+
+@pytest.mark.asyncio
 async def test_middleware_no_guardrails_on_short_input():
     ctx, deps = make_ctx()
 

@@ -46,7 +46,7 @@ class AppContext:
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     cfg = load_config()
 
-    logging.basicConfig(level=getattr(logging, cfg.log_level.upper(), logging.INFO))
+    logging.basicConfig(level=getattr(logging, (cfg.log_level or "INFO").upper(), logging.INFO))
     logger.info("AarnXen Multi-AI MCP Server starting...")
 
     registry = ProviderRegistry.from_config(cfg)
@@ -64,10 +64,10 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     knowledge = KnowledgeBase()
     circuit_breaker = CircuitBreaker()
     extractor = EntityExtractor(knowledge_base=knowledge)
-    router = SmartRouter(registry, circuit_breaker=circuit_breaker)
+    router = SmartRouter(registry, circuit_breaker=circuit_breaker, knowledge=knowledge)
     event_bus = EventBus()
     guardrails = Guardrails()
-    rate_limiter = RateLimiter(max_calls=60, window_seconds=60.0)
+    rate_limiter = RateLimiter(max_calls=cfg.rate_limit.max_calls, window_seconds=cfg.rate_limit.window_seconds)
 
     # Auto-start dashboard web UI in background thread
     dashboard_server = None
@@ -109,15 +109,18 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 
 
 mcp = FastMCP(
-    "aarnxen",
+    "ax",
     lifespan=app_lifespan,
     instructions=(
-        "Multi-model AI orchestration server with 20+ models (Gemini, DeepSeek, Qwen, "
-        "Kimi, GLM, MiniMax, Ollama). Use for: getting second opinions from external AI "
-        "models (chat, consensus, compare), deep reasoning with step-by-step analysis "
-        "(think), code review before committing (precommit, codereview), challenging your "
-        "own reasoning (challenge), and persistent knowledge storage (kb_store, kb_search, "
-        "kb_recall). Smart routing auto-picks the best model per task. Set cascade=True "
+        "Multi-model AI orchestration server with 30+ models (Gemini, DeepSeek, Qwen, "
+        "Kimi, GLM, MiniMax, GPT-OSS, Mistral, Cogito, Devstral). "
+        "TOOLS: chat (single model), consensus (parallel multi-model), compare (A/B), "
+        "think (deep reasoning), codereview, precommit, challenge (devil's advocate), "
+        "debate (adversarial 2-model + judge), verify (Chain of Verification with web grounding), "
+        "jury (N-model scoring), refine (Self-Refine iterative improvement), "
+        "web_search (DuckDuckGo + AI summary), web_fetch (URL to markdown), "
+        "swarm (parallel sub-tasks), pipeline (chain tools). "
+        "Smart routing auto-picks the best model per task. Set cascade=True "
         "on chat for automatic cheap-to-premium escalation. "
         "3-LAYER WORKFLOW (ALWAYS FOLLOW): "
         "1. kb_search_index(query) → Get index with IDs (~50-100 tokens/result) "
@@ -152,6 +155,12 @@ from aarnxen.tools.pipeline import pipeline_handler  # noqa: E402
 from aarnxen.tools.precommit import precommit_handler  # noqa: E402
 from aarnxen.tools.swarm import swarm_handler  # noqa: E402
 from aarnxen.tools.think import think_handler  # noqa: E402
+from aarnxen.tools.web_search import web_search_handler  # noqa: E402
+from aarnxen.tools.web_fetch import web_fetch_handler  # noqa: E402
+from aarnxen.tools.debate import debate_handler  # noqa: E402
+from aarnxen.tools.verify import verify_handler  # noqa: E402
+from aarnxen.tools.jury import jury_handler  # noqa: E402
+from aarnxen.tools.refine import refine_handler  # noqa: E402
 
 
 _chat_wrapped = tool_wrapper(chat_handler, "chat")
@@ -163,6 +172,74 @@ _consensus_wrapped = tool_wrapper(consensus_handler, "consensus")
 _compare_wrapped = tool_wrapper(compare_handler, "compare")
 _swarm_wrapped = tool_wrapper(swarm_handler, "swarm")
 _pipeline_wrapped = tool_wrapper(pipeline_handler, "pipeline")
+
+# System tool handlers (extracted for middleware wrapping)
+async def _list_models_handler(ctx=None):
+    deps = ctx.request_context.lifespan_context
+    return {"models": deps.registry.list_all_models()}
+
+async def _provider_health_handler(ctx=None):
+    deps = ctx.request_context.lifespan_context
+    return deps.circuit_breaker.get_all_status()
+
+async def _health_handler(ctx=None):
+    deps = ctx.request_context.lifespan_context
+    provider_count = len(deps.registry.list_all_models())
+    cb_status = deps.circuit_breaker.get_all_status()
+    if isinstance(cb_status, dict) and cb_status:
+        healthy_providers = sum(1 for s in cb_status.values() if s.get("state") == "CLOSED")
+    else:
+        healthy_providers = provider_count
+    kb_ok = False
+    try:
+        if deps.knowledge:
+            deps.knowledge.stats()
+            kb_ok = True
+    except Exception:
+        pass
+    cache_ok = deps.cache is not None
+    all_ok = healthy_providers > 0 and kb_ok
+    return {
+        "status": "healthy" if all_ok else "degraded",
+        "providers": {"total": provider_count, "healthy": healthy_providers},
+        "cache": {"enabled": cache_ok},
+        "knowledge_base": {"connected": kb_ok},
+        "circuit_breaker": cb_status,
+    }
+
+async def _events_handler(event_type: str = "", limit: int = 50, ctx=None):
+    deps = ctx.request_context.lifespan_context
+    return {"events": deps.event_bus.get_history(event_type, limit)}
+
+async def _kb_consolidate_handler(ctx=None):
+    deps = ctx.request_context.lifespan_context
+    return deps.knowledge.consolidate()
+
+# Wrap system tools
+_costs_wrapped = tool_wrapper(costs_handler, "costs")
+_list_models_wrapped = tool_wrapper(_list_models_handler, "list_models")
+_provider_health_wrapped = tool_wrapper(_provider_health_handler, "provider_health")
+_health_wrapped = tool_wrapper(_health_handler, "health")
+_events_wrapped = tool_wrapper(_events_handler, "events")
+_kb_consolidate_wrapped = tool_wrapper(_kb_consolidate_handler, "kb_consolidate")
+
+# Wrap KB tools
+_kb_store_wrapped = tool_wrapper(kb_store_handler, "kb_store")
+_kb_search_wrapped = tool_wrapper(kb_search_handler, "kb_search")
+_kb_get_wrapped = tool_wrapper(kb_get_handler, "kb_get")
+_kb_remember_wrapped = tool_wrapper(kb_remember_handler, "kb_remember")
+_kb_recall_wrapped = tool_wrapper(kb_recall_handler, "kb_recall")
+_kb_relate_wrapped = tool_wrapper(kb_relate_handler, "kb_relate")
+_kb_stats_wrapped = tool_wrapper(kb_stats_handler, "kb_stats")
+_kb_search_index_wrapped = tool_wrapper(kb_search_index_handler, "kb_search_index")
+_kb_timeline_wrapped = tool_wrapper(kb_timeline_handler, "kb_timeline")
+_kb_get_observations_wrapped = tool_wrapper(kb_get_observations_handler, "kb_get_observations")
+_web_search_wrapped = tool_wrapper(web_search_handler, "web_search")
+_web_fetch_wrapped = tool_wrapper(web_fetch_handler, "web_fetch")
+_debate_wrapped = tool_wrapper(debate_handler, "debate")
+_verify_wrapped = tool_wrapper(verify_handler, "verify")
+_jury_wrapped = tool_wrapper(jury_handler, "jury")
+_refine_wrapped = tool_wrapper(refine_handler, "refine")
 
 
 @mcp.tool()
@@ -270,69 +347,109 @@ async def swarm(
 
 
 @mcp.tool()
+async def web_search(
+    query: str,
+    max_results: int = 5,
+    model: str = "",
+    ctx: Context = None,
+) -> dict:
+    """Search the web via DuckDuckGo. Returns titles, URLs, and snippets. Optionally pass a model name to get an AI-generated summary of results. Use for fact-checking, research, or grounding responses in current information."""
+    return await _web_search_wrapped(query, max_results, model, ctx=ctx)
+
+
+@mcp.tool()
+async def web_fetch(
+    url: str,
+    model: str = "",
+    max_length: int = 10000,
+    ctx: Context = None,
+) -> dict:
+    """Fetch a URL and extract its content as clean text/markdown. Uses Jina Reader API for clean extraction with raw HTML fallback. Optionally pass a model to summarize. Use to read documentation, articles, or any web page."""
+    return await _web_fetch_wrapped(url, model, max_length, ctx=ctx)
+
+
+@mcp.tool()
+async def debate(
+    topic: str,
+    rounds: int = 3,
+    model_a: str = "auto",
+    model_b: str = "auto",
+    judge: str = "auto",
+    ctx: Context = None,
+) -> dict:
+    """Two AI models debate opposing sides of a topic, then a judge synthesizes a verdict. Use for exploring complex decisions, testing assumptions, or understanding multiple perspectives. Returns full transcript + verdict."""
+    return await _debate_wrapped(topic, rounds, model_a, model_b, judge, ctx=ctx)
+
+
+@mcp.tool()
+async def verify(
+    claim: str,
+    model: str = "auto",
+    web_check: bool = False,
+    ctx: Context = None,
+) -> dict:
+    """Verify a claim using Chain of Verification (CoVe). 4-step process: draft assessment → generate verification questions → answer independently → revised verdict with confidence (HIGH/MEDIUM/LOW). Set web_check=True to ground verification with web search."""
+    return await _verify_wrapped(claim, model, web_check, ctx=ctx)
+
+
+@mcp.tool()
+async def jury(
+    content: str,
+    criteria: str = "general",
+    models: str = "auto",
+    num_jurors: int = 3,
+    ctx: Context = None,
+) -> dict:
+    """N AI models independently score content (1-10) and aggregate votes. Use for quality assessment, code review scoring, or content evaluation. Criteria: general, code, writing, factual. Returns per-juror scores + aggregate."""
+    return await _jury_wrapped(content, criteria, models, num_jurors, ctx=ctx)
+
+
+@mcp.tool()
+async def refine(
+    prompt: str,
+    model: str = "auto",
+    critic: str = "auto",
+    iterations: int = 2,
+    ctx: Context = None,
+) -> dict:
+    """Self-Refine: generate → critique → refine for N iterations (~20% improvement). Uses two models — one generates, one critiques. Returns full history of improvements + final refined output."""
+    return await _refine_wrapped(prompt, model, critic, iterations, ctx=ctx)
+
+
+@mcp.tool()
 async def costs(ctx: Context = None) -> dict:
     """Show session cost summary and cache stats. Use to check how much you've spent on AI API calls and how effective the cache is."""
-    return await costs_handler(ctx)
+    return await _costs_wrapped(ctx=ctx)
 
 
 @mcp.tool()
 async def list_models(ctx: Context = None) -> dict:
     """List all available models across all providers."""
-    deps = ctx.request_context.lifespan_context
-    return {"models": deps.registry.list_all_models()}
+    return await _list_models_wrapped(ctx=ctx)
 
 
 @mcp.tool()
 async def provider_health(ctx: Context = None) -> dict:
     """Show circuit breaker health status for all AI providers. Use to check which providers are healthy, degraded, or down."""
-    deps = ctx.request_context.lifespan_context
-    return deps.circuit_breaker.get_all_status()
+    return await _provider_health_wrapped(ctx=ctx)
 
 
 @mcp.tool()
 async def health(ctx: Context = None) -> dict:
     """Server health check. Returns status of all subsystems (providers, cache, knowledge base, circuit breaker). Use to verify the server is operational."""
-    deps = ctx.request_context.lifespan_context
-
-    provider_count = len(deps.registry.list_all_models())
-    cb_status = deps.circuit_breaker.get_all_status()
-    if isinstance(cb_status, dict) and cb_status:
-        healthy_providers = sum(1 for s in cb_status.values() if s.get("state") == "CLOSED")
-    else:
-        healthy_providers = provider_count
-
-    kb_ok = False
-    try:
-        if deps.knowledge:
-            deps.knowledge.stats()
-            kb_ok = True
-    except Exception:
-        pass
-
-    cache_ok = deps.cache is not None
-
-    all_ok = healthy_providers > 0 and kb_ok
-    return {
-        "status": "healthy" if all_ok else "degraded",
-        "providers": {"total": provider_count, "healthy": healthy_providers},
-        "cache": {"enabled": cache_ok},
-        "knowledge_base": {"connected": kb_ok},
-        "circuit_breaker": cb_status,
-    }
+    return await _health_wrapped(ctx=ctx)
 
 
 @mcp.tool()
 async def events(event_type: str = "", limit: int = 50, ctx: Context = None) -> dict:
     """View recent system events (model failures, budget exceeded, circuit breaker trips). Filter by event_type."""
-    deps = ctx.request_context.lifespan_context
-    return {"events": deps.event_bus.get_history(event_type, limit)}
+    return await _events_wrapped(event_type, limit, ctx=ctx)
 
 
 @mcp.tool()
 async def kb_consolidate(ctx: Context = None) -> dict:
     """Run memory maintenance: deduplicate, decay old relations, prune stale data."""
-    deps = ctx.request_context.lifespan_context
-    return deps.knowledge.consolidate()
+    return await _kb_consolidate_wrapped(ctx=ctx)
 
 
 # --- Knowledge Base Tools ---
@@ -348,19 +465,19 @@ async def kb_store(
     ctx: Context = None,
 ) -> dict:
     """Store a document/note/fact in the knowledge base. Use this to remember important information, project decisions, or facts for future reference."""
-    return await kb_store_handler(title, content, doc_type, tags, source, ctx)
+    return await _kb_store_wrapped(title, content, doc_type, tags, source, ctx=ctx)
 
 
 @mcp.tool()
 async def kb_search(query: str, limit: int = 5, ctx: Context = None) -> dict:
     """Search the knowledge base. Use to find previously stored notes, facts, or documents by keyword or topic."""
-    return await kb_search_handler(query, limit, ctx)
+    return await _kb_search_wrapped(query, limit, ctx=ctx)
 
 
 @mcp.tool()
 async def kb_get(doc_id: str, ctx: Context = None) -> dict:
     """Retrieve a specific document by ID."""
-    return await kb_get_handler(doc_id, ctx)
+    return await _kb_get_wrapped(doc_id, ctx=ctx)
 
 
 @mcp.tool()
@@ -373,13 +490,13 @@ async def kb_remember(
     ctx: Context = None,
 ) -> dict:
     """Remember a fact about an entity (person, project, concept)."""
-    return await kb_remember_handler(entity, fact, entity_type, obs_type, session_id, ctx)
+    return await _kb_remember_wrapped(entity, fact, entity_type, obs_type, session_id, ctx=ctx)
 
 
 @mcp.tool()
 async def kb_recall(query: str, ctx: Context = None) -> dict:
     """Recall everything known about an entity or topic. Use to retrieve all stored facts, relationships, and observations about a person, project, or concept."""
-    return await kb_recall_handler(query, ctx)
+    return await _kb_recall_wrapped(query, ctx=ctx)
 
 
 @mcp.tool()
@@ -390,13 +507,13 @@ async def kb_relate(
     ctx: Context = None,
 ) -> dict:
     """Create a relationship between two entities."""
-    return await kb_relate_handler(from_entity, to_entity, relation, ctx)
+    return await _kb_relate_wrapped(from_entity, to_entity, relation, ctx=ctx)
 
 
 @mcp.tool()
 async def kb_stats(ctx: Context = None) -> dict:
     """Show knowledge base statistics."""
-    return await kb_stats_handler(ctx)
+    return await _kb_stats_wrapped(ctx=ctx)
 
 
 # --- 3-Layer Search Tools ---
@@ -411,7 +528,7 @@ async def kb_search_index(
     ctx: Context = None,
 ) -> dict:
     """Step 1: Search observations index. Returns lightweight results with IDs (~50-100 tokens each). Use kb_get_observations to fetch full details for filtered IDs. 10x token savings."""
-    return await kb_search_index_handler(query, limit, obs_type, session_id, ctx)
+    return await _kb_search_index_wrapped(query, limit, obs_type, session_id, ctx=ctx)
 
 
 @mcp.tool()
@@ -423,7 +540,7 @@ async def kb_timeline(
     ctx: Context = None,
 ) -> dict:
     """Step 2: Get chronological context around an observation. Provide anchor (observation ID) or query to find anchor automatically."""
-    return await kb_timeline_handler(anchor, query, depth_before, depth_after, ctx)
+    return await _kb_timeline_wrapped(anchor, query, depth_before, depth_after, ctx=ctx)
 
 
 @mcp.tool()
@@ -432,7 +549,7 @@ async def kb_get_observations(
     ctx: Context = None,
 ) -> dict:
     """Step 3: Fetch full details for specific observation IDs (comma-separated). Use after kb_search_index to get only the data you need."""
-    return await kb_get_observations_handler(ids, ctx)
+    return await _kb_get_observations_wrapped(ids, ctx=ctx)
 
 
 # --- MCP Resources (read-only context) ---

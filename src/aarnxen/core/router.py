@@ -16,20 +16,28 @@ logger = logging.getLogger(__name__)
 
 TIERS = {
     # Budget: fast, lightweight — simple Q&A, greetings, short answers
+    # Newest Gemini first, then free Ollama Cloud
     "budget": [
-        "gemini-3.1-flash-lite-preview", "glm-4.7", "qwen3.5:397b-cloud",
-        "gemini-2.5-flash", "gemini-2.5-flash-lite", "minimax-m2", "minimax-m2.1",
+        "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview",
+        "gpt-oss:20b-cloud", "qwen3.5:397b-cloud",
+        "minimax-m2.1", "minimax-m2", "glm-4.7",
+        "gemini-2.5-flash", "gemini-2.5-flash-lite",
     ],
     # Balanced: strong general-purpose — creative, general knowledge, moderate coding
+    # Best free models first, then paid Gemini
     "balanced": [
-        "gemini-3-flash-preview", "kimi-k2.5", "glm-5", "deepseek-v3.2",
-        "qwen3-next:80b-cloud", "glm-4.7", "gemini-2.5-pro", "gpt-4o-mini",
+        "kimi-k2:1t-cloud", "deepseek-v3.2", "glm-5", "kimi-k2.5",
+        "mistral-large-3:675b-cloud", "deepseek-v3.1:671b-cloud",
+        "qwen3-next:80b-cloud", "gemini-3-flash-preview",
+        "gemini-2.5-pro", "gpt-4o-mini",
     ],
     # Premium: frontier-class — coding, reasoning, complex analysis
+    # Best overall first: newest Gemini, then top free Ollama Cloud
     "premium": [
-        "minimax-m2.5", "deepseek-v3.2", "kimi-k2-thinking", "cogito-2.1:671b-cloud",
-        "glm-5", "qwen3-coder-next:latest", "devstral-2:123b-cloud",
-        "gemini-3.1-pro-preview", "gemini-2.5-pro", "gpt-4o",
+        "gemini-3.1-pro-preview", "kimi-k2-thinking", "minimax-m2.5",
+        "deepseek-v3.2", "qwen3-coder-next:latest", "cogito-2.1:671b-cloud",
+        "glm-5", "gpt-oss:120b-cloud", "devstral-2:123b-cloud",
+        "qwen3-vl:235b-cloud", "gemini-2.5-pro", "gpt-4o",
     ],
 }
 
@@ -95,9 +103,11 @@ class SmartRouter:
         self,
         registry: ProviderRegistry,
         circuit_breaker: Optional["CircuitBreaker"] = None,
+        knowledge=None,
     ):
         self._registry = registry
         self._circuit_breaker = circuit_breaker
+        self._knowledge = knowledge
         self._available_models = {m["model"] for m in registry.list_all_models()}
 
     def classify(self, prompt: str) -> str:
@@ -148,10 +158,56 @@ class SmartRouter:
 
     def _find_available(self, tier_name: str) -> Optional[str]:
         tier_models = TIERS.get(tier_name, TIERS["budget"])
+
+        # Memory-informed: reorder tier by past performance if KB data exists
+        if self._knowledge:
+            try:
+                ranked = self._rank_by_performance(tier_models)
+                if ranked:
+                    tier_models = ranked
+            except Exception as exc:
+                logger.debug("Performance ranking failed, using static order: %s", exc)
+
         for model in tier_models:
             if model in self._available_models and self._is_circuit_healthy(model):
                 return model
         return None
+
+    def _rank_by_performance(self, models: list[str]) -> list[str]:
+        """Reorder models by average latency from KB performance observations."""
+        perf = self._knowledge.search_observations_index(
+            "model_performance", limit=50, obs_type="model_performance",
+        )
+        if not perf:
+            return models
+
+        # Parse latency from stored observations like "model=X latency=150ms ..."
+        latencies: dict[str, list[float]] = {}
+        for obs in perf:
+            snippet = obs.get("snippet", "")
+            entity = obs.get("entity", "")
+            match = re.search(r"latency=([\d.]+)\s*ms", snippet)
+            if match:
+                try:
+                    latencies.setdefault(entity, []).append(float(match.group(1)))
+                except ValueError:
+                    continue
+
+        if not latencies:
+            return models
+
+        model_set = set(models)
+        scored = []
+        unscored = []
+        for m in models:
+            if m in latencies:
+                avg = sum(latencies[m]) / len(latencies[m])
+                scored.append((avg, m))
+            else:
+                unscored.append(m)
+
+        scored.sort()
+        return [m for _, m in scored] + unscored
 
     def route(self, prompt: str) -> tuple[str, str, str]:
         """Classify and route. Returns (model_name, task_type, tier)."""

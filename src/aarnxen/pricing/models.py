@@ -43,6 +43,12 @@ PRICING: dict[tuple[str, str], tuple[float, float]] = {
     ("ollama-cloud", "rnj-1:8b-cloud"): (0.0, 0.0),
     ("ollama-cloud", "ministral-3:8b-cloud"): (0.0, 0.0),
     ("ollama-cloud", "gemini-3-flash-preview:latest"): (0.0, 0.0),
+    ("ollama-cloud", "gpt-oss:20b-cloud"): (0.0, 0.0),
+    ("ollama-cloud", "gpt-oss:120b-cloud"): (0.0, 0.0),
+    ("ollama-cloud", "qwen3-vl:235b-cloud"): (0.0, 0.0),
+    ("ollama-cloud", "mistral-large-3:675b-cloud"): (0.0, 0.0),
+    ("ollama-cloud", "deepseek-v3.1:671b-cloud"): (0.0, 0.0),
+    ("ollama-cloud", "kimi-k2:1t-cloud"): (0.0, 0.0),
 }
 
 

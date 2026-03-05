@@ -1,13 +1,17 @@
 """Tests for health check tool."""
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 
 def _make_ctx(provider_count=5, cb_status=None, kb_ok=True, cache_ok=True):
     deps = MagicMock()
     deps.registry.list_all_models.return_value = [{"model": f"m{i}"} for i in range(provider_count)]
     deps.circuit_breaker.get_all_status.return_value = cb_status or {}
+    deps.event_bus = MagicMock()
+    deps.event_bus.emit = AsyncMock()
+    deps.rate_limiter = None
+    deps.guardrails = None
 
     if kb_ok:
         deps.knowledge.stats.return_value = {"docs": 10}
