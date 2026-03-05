@@ -423,3 +423,165 @@ def test_backward_compatibility(kb):
     assert len(results) >= 1
 
     assert kb.delete_document(doc_id) is True
+
+
+# --- Observation Types + Session Tracking Tests ---
+
+def test_add_observation_with_type(kb):
+    kb.add_entity("Python")
+    oid = kb.add_observation("Python", "Fixed GIL contention bug", obs_type="bugfix")
+    row = kb._conn.execute("SELECT obs_type FROM observations WHERE id = ?", (oid,)).fetchone()
+    assert row[0] == "bugfix"
+
+
+def test_add_observation_with_session_id(kb):
+    kb.add_entity("React")
+    oid = kb.add_observation("React", "Added lazy loading", session_id="sess-abc-123")
+    row = kb._conn.execute("SELECT session_id FROM observations WHERE id = ?", (oid,)).fetchone()
+    assert row[0] == "sess-abc-123"
+
+
+def test_default_obs_type_is_general(kb):
+    kb.add_entity("Go")
+    oid = kb.add_observation("Go", "Go 1.22 released")
+    row = kb._conn.execute("SELECT obs_type FROM observations WHERE id = ?", (oid,)).fetchone()
+    assert row[0] == "general"
+
+
+def test_observation_migration_columns(tmp_path):
+    db_path = str(tmp_path / "obs_migrate.db")
+    kb1 = KnowledgeBase(db_path=db_path)
+    assert kb1._has_column("observations", "obs_type")
+    assert kb1._has_column("observations", "session_id")
+    assert kb1._has_column("documents", "embedding")
+    kb1.close()
+
+
+# --- 3-Layer Search Tests ---
+
+def test_search_observations_index(kb):
+    kb.add_entity("FastAPI")
+    kb.add_observation("FastAPI", "FastAPI supports async route handlers", obs_type="feature")
+    kb.add_observation("FastAPI", "FastAPI uses Starlette under the hood", obs_type="discovery")
+
+    results = kb.search_observations_index("FastAPI")
+    assert len(results) == 2
+    assert "id" in results[0]
+    assert "snippet" in results[0]
+    assert len(results[0]["snippet"]) <= 80
+
+
+def test_search_observations_index_type_filter(kb):
+    kb.add_entity("Django")
+    kb.add_observation("Django", "Fixed ORM N+1 query", obs_type="bugfix")
+    kb.add_observation("Django", "Added async view support", obs_type="feature")
+    kb.add_observation("Django", "Django uses MTV pattern", obs_type="discovery")
+
+    results = kb.search_observations_index("Django", obs_type="bugfix")
+    assert len(results) == 1
+    assert results[0]["obs_type"] == "bugfix"
+
+
+def test_search_observations_index_session_filter(kb):
+    kb.add_entity("Node")
+    kb.add_observation("Node", "Node 22 is LTS", session_id="sess-1")
+    kb.add_observation("Node", "Node uses V8 engine", session_id="sess-2")
+
+    results = kb.search_observations_index("Node", session_id="sess-1")
+    assert len(results) == 1
+    assert results[0]["session_id"] == "sess-1"
+
+
+def test_get_observations_by_ids(kb):
+    kb.add_entity("Rust")
+    oid1 = kb.add_observation("Rust", "Rust has no garbage collector")
+    oid2 = kb.add_observation("Rust", "Rust uses ownership model")
+    kb.add_observation("Rust", "Rust compiles to native code")
+
+    results = kb.get_observations_by_ids([oid1, oid2])
+    assert len(results) == 2
+    assert "content" in results[0]
+    ids = {r["id"] for r in results}
+    assert oid1 in ids
+    assert oid2 in ids
+
+
+def test_get_observations_empty_ids(kb):
+    results = kb.get_observations_by_ids([])
+    assert results == []
+
+
+def test_get_observations_nonexistent_id(kb):
+    results = kb.get_observations_by_ids(["fake-id-123"])
+    assert results == []
+
+
+# --- Timeline Tests ---
+
+def test_timeline_by_anchor_id(kb):
+    kb.add_entity("Project")
+    oids = []
+    for i in range(10):
+        oid = kb.add_observation("Project", f"Event {i}")
+        oids.append(oid)
+        time.sleep(0.01)
+
+    results = kb.timeline(anchor_id=oids[5], depth_before=2, depth_after=2)
+    assert len(results) >= 3
+
+
+def test_timeline_by_query(kb):
+    kb.add_entity("Debug")
+    kb.add_observation("Debug", "Started investigating memory leak")
+    time.sleep(0.01)
+    kb.add_observation("Debug", "Found root cause in connection pool")
+    time.sleep(0.01)
+    kb.add_observation("Debug", "Applied fix and verified")
+
+    results = kb.timeline(query="root cause", depth_before=1, depth_after=1)
+    assert len(results) >= 2
+
+
+def test_timeline_no_match(kb):
+    results = kb.timeline(query="nonexistent event xyz")
+    assert results == []
+
+
+def test_timeline_at_boundary(kb):
+    kb.add_entity("Edge")
+    oid = kb.add_observation("Edge", "Only observation")
+    results = kb.timeline(anchor_id=oid, depth_before=5, depth_after=5)
+    assert len(results) >= 1
+
+
+# --- Hybrid Search Tests ---
+
+def test_search_hybrid_without_embedder(kb):
+    kb.store_document("Hybrid Test", "unique hybrid searchable content")
+    kb._embedder = None
+    results = kb.search_hybrid("unique hybrid searchable")
+    assert len(results) >= 1
+    assert results[0]["title"] == "Hybrid Test"
+
+
+def test_search_hybrid_returns_results(kb):
+    kb.store_document("Hybrid Doc", "semantic vector search test content")
+    results = kb.search_hybrid("semantic vector search")
+    assert len(results) >= 1
+
+
+def test_embedding_column_migration(tmp_path):
+    db_path = str(tmp_path / "emb_test.db")
+    kb1 = KnowledgeBase(db_path=db_path)
+    assert kb1._has_column("documents", "embedding")
+    kb1.close()
+
+
+# --- Stats Tests ---
+
+def test_stats_includes_embedding_info(kb):
+    kb.store_document("Stats Test", "content for stats")
+    stats = kb.stats()
+    assert "embedded_documents" in stats
+    assert "has_embeddings" in stats
+    assert isinstance(stats["has_embeddings"], bool)

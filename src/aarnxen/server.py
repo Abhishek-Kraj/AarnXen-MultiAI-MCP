@@ -83,7 +83,12 @@ mcp = FastMCP(
         "(think), code review before committing (precommit, codereview), challenging your "
         "own reasoning (challenge), and persistent knowledge storage (kb_store, kb_search, "
         "kb_recall). Smart routing auto-picks the best model per task. Set cascade=True "
-        "on chat for automatic cheap-to-premium escalation."
+        "on chat for automatic cheap-to-premium escalation. "
+        "3-LAYER WORKFLOW (ALWAYS FOLLOW): "
+        "1. kb_search_index(query) → Get index with IDs (~50-100 tokens/result) "
+        "2. kb_timeline(anchor=ID) → Get context around interesting results "
+        "3. kb_get_observations([IDs]) → Fetch full details ONLY for filtered IDs. "
+        "NEVER fetch full details without filtering first. 10x token savings."
     ),
 )
 
@@ -97,16 +102,20 @@ from aarnxen.tools.consensus import consensus_handler  # noqa: E402
 from aarnxen.tools.costs import costs_handler  # noqa: E402
 from aarnxen.tools.knowledge import (  # noqa: E402
     kb_get_handler,
+    kb_get_observations_handler,
     kb_recall_handler,
     kb_relate_handler,
     kb_remember_handler,
     kb_search_handler,
+    kb_search_index_handler,
     kb_stats_handler,
     kb_store_handler,
+    kb_timeline_handler,
 )
 from aarnxen.tools.challenge import challenge_handler  # noqa: E402
 from aarnxen.tools.pipeline import pipeline_handler  # noqa: E402
 from aarnxen.tools.precommit import precommit_handler  # noqa: E402
+from aarnxen.tools.swarm import swarm_handler  # noqa: E402
 from aarnxen.tools.think import think_handler  # noqa: E402
 
 
@@ -203,6 +212,17 @@ async def pipeline(
 
 
 @mcp.tool()
+async def swarm(
+    tasks: str,
+    model: str = "auto",
+    concurrency: int = 10,
+    ctx: Context = None,
+) -> dict:
+    """Launch multiple AI agents in parallel on different sub-tasks. Use when you need to break a complex problem into sub-tasks, get N independent analyses, or run parallel code reviews. Pass a JSON array of task objects with "prompt" and optional "model", "system_prompt", "label". Max 100 agents, default concurrency 10."""
+    return await swarm_handler(tasks, model, concurrency, ctx)
+
+
+@mcp.tool()
 async def costs(ctx: Context = None) -> dict:
     """Show session cost summary and cache stats. Use to check how much you've spent on AI API calls and how effective the cache is."""
     return await costs_handler(ctx)
@@ -262,10 +282,12 @@ async def kb_remember(
     entity: str,
     fact: str,
     entity_type: str = "concept",
+    obs_type: str = "general",
+    session_id: str = "",
     ctx: Context = None,
 ) -> dict:
     """Remember a fact about an entity (person, project, concept)."""
-    return await kb_remember_handler(entity, fact, entity_type, ctx)
+    return await kb_remember_handler(entity, fact, entity_type, obs_type, session_id, ctx)
 
 
 @mcp.tool()
@@ -291,6 +313,42 @@ async def kb_stats(ctx: Context = None) -> dict:
     return await kb_stats_handler(ctx)
 
 
+# --- 3-Layer Search Tools ---
+
+
+@mcp.tool()
+async def kb_search_index(
+    query: str,
+    limit: int = 20,
+    obs_type: str = "",
+    session_id: str = "",
+    ctx: Context = None,
+) -> dict:
+    """Step 1: Search observations index. Returns lightweight results with IDs (~50-100 tokens each). Use kb_get_observations to fetch full details for filtered IDs. 10x token savings."""
+    return await kb_search_index_handler(query, limit, obs_type, session_id, ctx)
+
+
+@mcp.tool()
+async def kb_timeline(
+    anchor: str = "",
+    query: str = "",
+    depth_before: int = 5,
+    depth_after: int = 5,
+    ctx: Context = None,
+) -> dict:
+    """Step 2: Get chronological context around an observation. Provide anchor (observation ID) or query to find anchor automatically."""
+    return await kb_timeline_handler(anchor, query, depth_before, depth_after, ctx)
+
+
+@mcp.tool()
+async def kb_get_observations(
+    ids: str,
+    ctx: Context = None,
+) -> dict:
+    """Step 3: Fetch full details for specific observation IDs (comma-separated). Use after kb_search_index to get only the data you need."""
+    return await kb_get_observations_handler(ids, ctx)
+
+
 # --- MCP Resources (read-only context) ---
 
 
@@ -300,7 +358,7 @@ def models_resource() -> str:
     from aarnxen.providers.ollama import CLOUD_MODELS
     import json
     models = {
-        "gemini": ["gemini-2.5-flash", "gemini-2.5-pro"],
+        "gemini": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"],
         "ollama-cloud": list(CLOUD_MODELS.keys()),
     }
     return json.dumps(models, indent=2)

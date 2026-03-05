@@ -7,6 +7,7 @@ built-in FTS5 for ranked text search.
 
 import math
 import sqlite3
+import struct
 import time
 import uuid
 from datetime import datetime, timezone
@@ -46,6 +47,7 @@ class KnowledgeBase:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._create_tables()
         self._migrate()
+        self._init_embeddings()
 
     def _create_tables(self):
         self._conn.executescript("""
@@ -116,13 +118,34 @@ class KnowledgeBase:
             );
         """)
 
+    def _init_embeddings(self):
+        try:
+            from sentence_transformers import SentenceTransformer
+            self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        except ImportError:
+            self._embedder = None
+
+    def _embed(self, text: str) -> Optional[bytes]:
+        if not self._embedder:
+            return None
+        vec = self._embedder.encode(text, normalize_embeddings=True)
+        return struct.pack(f"{len(vec)}f", *vec)
+
+    @staticmethod
+    def _cosine_similarity(a_bytes: bytes, b_bytes: bytes) -> float:
+        n = len(a_bytes) // 4
+        a = struct.unpack(f"{n}f", a_bytes)
+        b = struct.unpack(f"{n}f", b_bytes)
+        dot = sum(x * y for x, y in zip(a, b))
+        return max(0.0, min(dot, 1.0))
+
     def _has_column(self, table, column):
         cols = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
         return any(c[1] == column for c in cols)
 
     def _migrate(self):
-        # Documents: importance scoring columns
         migrations = [
+            # Documents: importance scoring columns
             ("documents", "importance", "REAL DEFAULT 5.0"),
             ("documents", "access_count", "INTEGER DEFAULT 0"),
             ("documents", "last_accessed", "TEXT DEFAULT ''"),
@@ -132,6 +155,11 @@ class KnowledgeBase:
             ("relations", "confidence", "REAL DEFAULT 1.0"),
             ("relations", "last_reinforced", "TEXT DEFAULT ''"),
             ("relations", "half_life_days", "REAL DEFAULT 30.0"),
+            # Observations: type and session tracking
+            ("observations", "obs_type", "TEXT DEFAULT 'general'"),
+            ("observations", "session_id", "TEXT DEFAULT ''"),
+            # Documents: embedding vector
+            ("documents", "embedding", "BLOB DEFAULT NULL"),
         ]
         for table, column, coldef in migrations:
             if not self._has_column(table, column):
@@ -159,6 +187,9 @@ class KnowledgeBase:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1.0, ?)",
             (doc_id, title, content, doc_type, tags, source, now, now, importance, now_iso, scope),
         )
+        emb = self._embed(f"{title} {content}")
+        if emb:
+            self._conn.execute("UPDATE documents SET embedding = ? WHERE id = ?", (emb, doc_id))
         self._conn.commit()
         return doc_id
 
@@ -392,13 +423,15 @@ class KnowledgeBase:
                 })
         return results
 
-    def add_observation(self, entity_name: str, content: str) -> str:
+    def add_observation(self, entity_name: str, content: str,
+                        obs_type: str = "general", session_id: str = "") -> str:
         self.add_entity(entity_name)
         eid = self._conn.execute("SELECT id FROM entities WHERE name = ?", (entity_name,)).fetchone()[0]
         oid = str(uuid.uuid4())[:8]
         self._conn.execute(
-            "INSERT INTO observations (id, entity_id, content, created_at) VALUES (?, ?, ?, ?)",
-            (oid, eid, content, time.time()),
+            "INSERT INTO observations (id, entity_id, content, created_at, obs_type, session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (oid, eid, content, time.time(), obs_type, session_id),
         )
         self._conn.commit()
         return oid
@@ -428,6 +461,116 @@ class KnowledgeBase:
                 "relations": [{"to": rel[0], "type": rel[1]} for rel in rels],
             })
         return results
+
+    # --- 3-Layer Search ---
+
+    def search_observations_index(self, query: str, limit: int = 20,
+                                   obs_type: str = None, session_id: str = None) -> list[dict]:
+        """Layer 1: Lightweight observation search — returns IDs + snippets."""
+        conditions = ["(o.content LIKE ? OR e.name LIKE ?)"]
+        params = [f"%{query}%", f"%{query}%"]
+        if obs_type:
+            conditions.append("o.obs_type = ?")
+            params.append(obs_type)
+        if session_id:
+            conditions.append("o.session_id = ?")
+            params.append(session_id)
+        where = " AND ".join(conditions)
+        params.append(limit)
+        rows = self._conn.execute(
+            f"SELECT o.id, e.name, o.content, o.obs_type, o.created_at, o.session_id "
+            f"FROM observations o JOIN entities e ON e.id = o.entity_id "
+            f"WHERE {where} ORDER BY o.created_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [
+            {"id": r[0], "entity": r[1], "snippet": r[2][:80],
+             "obs_type": r[3] or "general", "created_at": r[4], "session_id": r[5] or ""}
+            for r in rows
+        ]
+
+    def get_observations_by_ids(self, ids: list[str]) -> list[dict]:
+        """Layer 3: Fetch full details for specific observation IDs."""
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"SELECT o.id, e.name, o.content, o.obs_type, o.created_at, o.session_id "
+            f"FROM observations o JOIN entities e ON e.id = o.entity_id "
+            f"WHERE o.id IN ({placeholders}) ORDER BY o.created_at",
+            ids,
+        ).fetchall()
+        return [
+            {"id": r[0], "entity": r[1], "content": r[2],
+             "obs_type": r[3] or "general", "created_at": r[4], "session_id": r[5] or ""}
+            for r in rows
+        ]
+
+    def timeline(self, anchor_id: str = None, query: str = None,
+                 depth_before: int = 5, depth_after: int = 5) -> list[dict]:
+        """Layer 2: Get chronological context around an observation."""
+        anchor_time = None
+        if anchor_id:
+            row = self._conn.execute(
+                "SELECT created_at FROM observations WHERE id = ?", (anchor_id,)
+            ).fetchone()
+            if row:
+                anchor_time = row[0]
+        if anchor_time is None and query:
+            row = self._conn.execute(
+                "SELECT created_at FROM observations WHERE content LIKE ? ORDER BY created_at DESC LIMIT 1",
+                (f"%{query}%",),
+            ).fetchone()
+            if row:
+                anchor_time = row[0]
+        if anchor_time is None:
+            return []
+        before = self._conn.execute(
+            "SELECT o.id, e.name, o.content, o.obs_type, o.created_at, o.session_id "
+            "FROM observations o JOIN entities e ON e.id = o.entity_id "
+            "WHERE o.created_at < ? ORDER BY o.created_at DESC LIMIT ?",
+            (anchor_time, depth_before),
+        ).fetchall()
+        after = self._conn.execute(
+            "SELECT o.id, e.name, o.content, o.obs_type, o.created_at, o.session_id "
+            "FROM observations o JOIN entities e ON e.id = o.entity_id "
+            "WHERE o.created_at >= ? ORDER BY o.created_at ASC LIMIT ?",
+            (anchor_time, depth_after + 1),
+        ).fetchall()
+        combined = list(reversed(before)) + list(after)
+        return [
+            {"id": r[0], "entity": r[1], "content": r[2],
+             "obs_type": r[3] or "general", "created_at": r[4], "session_id": r[5] or ""}
+            for r in combined
+        ]
+
+    # --- Hybrid Search ---
+
+    def search_hybrid(self, query: str, limit: int = 10, scope: Optional[str] = None) -> list[dict]:
+        """FTS5 + optional vector search. Falls back to pure FTS5 when no embedder."""
+        fts_results = self.search_documents(query, limit, scope)
+        if not self._embedder:
+            return fts_results
+        query_emb = self._embed(query)
+        if not query_emb:
+            return fts_results
+        rows = self._conn.execute(
+            "SELECT id, embedding FROM documents WHERE embedding IS NOT NULL"
+        ).fetchall()
+        vec_scores = {}
+        for doc_id, emb_blob in rows:
+            if emb_blob:
+                vec_scores[doc_id] = self._cosine_similarity(query_emb, emb_blob)
+        if not vec_scores:
+            return fts_results
+        max_fts = max((r["combined_score"] for r in fts_results), default=1.0) or 1.0
+        for r in fts_results:
+            fts_norm = r["combined_score"] / max_fts
+            vec_score = vec_scores.get(r["id"], 0.0)
+            r["combined_score"] = round(0.5 * fts_norm + 0.5 * vec_score, 4)
+            r["vector_score"] = round(vec_score, 4)
+        fts_results.sort(key=lambda x: x["combined_score"], reverse=True)
+        return fts_results
 
     # --- Memory Deduplication & Consolidation ---
 
@@ -508,7 +651,12 @@ class KnowledgeBase:
         entities = self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
         relations = self._conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
         observations = self._conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
-        return {"documents": docs, "entities": entities, "relations": relations, "observations": observations}
+        embedded = self._conn.execute("SELECT COUNT(*) FROM documents WHERE embedding IS NOT NULL").fetchone()[0]
+        return {
+            "documents": docs, "entities": entities, "relations": relations,
+            "observations": observations, "embedded_documents": embedded,
+            "has_embeddings": self._embedder is not None,
+        }
 
     def close(self):
         self._conn.close()
