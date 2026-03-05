@@ -12,24 +12,21 @@ from aarnxen.providers.registry import ProviderRegistry
 logger = logging.getLogger(__name__)
 
 TIERS = {
-    # Ollama Cloud models first (free per-token, subscription-based)
-    # Budget: fast, lightweight — good for simple Q&A, greetings, short answers
+    # Budget: fast, lightweight — simple Q&A, greetings, short answers
     "budget": [
-        "qwen3.5", "llama3.2", "cogito-2.1", "ministral-3",
-        "gemini-2.5-flash", "llama-3.3-70b-versatile",
+        "glm-4.7", "qwen3.5:397b-cloud", "gemini-2.5-flash",
+        "gemini-2.5-flash-lite", "minimax-m2", "minimax-m2.1",
     ],
-    # Balanced: strong general-purpose — good for creative, general knowledge
+    # Balanced: strong general-purpose — creative, general knowledge, moderate coding
     "balanced": [
-        "kimi-k2.5", "qwen3-next", "glm-4.7", "deepseek-v3.2",
-        "gemini-2.5-pro", "gpt-4o-mini", "mixtral",
+        "kimi-k2.5", "glm-5", "deepseek-v3.2", "qwen3-next:80b-cloud", "glm-4.7",
+        "gemini-2.5-pro", "gpt-4o-mini",
     ],
-    # Premium: frontier-class — for coding, reasoning, complex analysis
-    # GLM-5: 77.8% SWE-bench, 92.7% AIME | MiniMax M2.5: 80.2% SWE-bench
-    # Kimi K2 Thinking: 100% AIME | DeepSeek V3.2: "comparable to GPT-5"
+    # Premium: frontier-class — coding, reasoning, complex analysis
     "premium": [
-        "glm-5", "minimax-m2.5", "kimi-k2-thinking", "deepseek-v3.2",
-        "qwen3-coder-next", "devstral-2",
-        "gemini-2.5-pro", "gpt-4o", "claude-3-opus",
+        "minimax-m2.5", "deepseek-v3.2", "kimi-k2-thinking", "cogito-2.1:671b-cloud",
+        "glm-5", "qwen3-coder-next:latest", "devstral-2:123b-cloud",
+        "gemini-3.1-pro-preview", "gemini-2.5-pro", "gpt-4o",
     ],
 }
 

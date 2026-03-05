@@ -21,12 +21,9 @@ def _make_ctx(response_text="No issues found. PASS"):
 
     cost_entry = MagicMock(cost_usd=0.001)
 
-    deps = {
-        "registry": MagicMock(),
-        "cost_tracker": MagicMock(),
-    }
-    deps["registry"].resolve.return_value = (provider, "test-model")
-    deps["cost_tracker"].record.return_value = cost_entry
+    deps = MagicMock()
+    deps.registry.resolve.return_value = (provider, "test-model")
+    deps.cost_tracker.record.return_value = cost_entry
 
     ctx = MagicMock()
     ctx.request_context.lifespan_context = deps
@@ -50,7 +47,7 @@ async def test_precommit_records_cost():
     ctx, _, deps = _make_ctx()
     await precommit_handler("diff --git a/file.py", ctx=ctx)
 
-    deps["cost_tracker"].record.assert_called_once_with(
+    deps.cost_tracker.record.assert_called_once_with(
         "test-provider", "test-model", 200, 100,
     )
 

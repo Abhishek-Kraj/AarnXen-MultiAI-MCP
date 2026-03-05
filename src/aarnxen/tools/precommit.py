@@ -15,8 +15,8 @@ async def precommit_handler(
         model: Model to use for review.
     """
     deps = ctx.request_context.lifespan_context
-    registry = deps["registry"]
-    cost_tracker = deps["cost_tracker"]
+    registry = deps.registry
+    cost_tracker = deps.cost_tracker
 
     provider, resolved_model = registry.resolve(model)
 

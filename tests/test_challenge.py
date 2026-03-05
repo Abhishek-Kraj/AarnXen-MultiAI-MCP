@@ -21,12 +21,9 @@ def _make_ctx(response_text="The claim has merit. Verdict: MODERATE"):
 
     cost_entry = MagicMock(cost_usd=0.002)
 
-    deps = {
-        "registry": MagicMock(),
-        "cost_tracker": MagicMock(),
-    }
-    deps["registry"].resolve.return_value = (provider, "test-model")
-    deps["cost_tracker"].record.return_value = cost_entry
+    deps = MagicMock()
+    deps.registry.resolve.return_value = (provider, "test-model")
+    deps.cost_tracker.record.return_value = cost_entry
 
     ctx = MagicMock()
     ctx.request_context.lifespan_context = deps
@@ -48,7 +45,7 @@ async def test_challenge_records_cost():
     ctx, _, deps = _make_ctx()
     await challenge_handler("Microservices are always better", ctx=ctx)
 
-    deps["cost_tracker"].record.assert_called_once_with(
+    deps.cost_tracker.record.assert_called_once_with(
         "test-provider", "test-model", 300, 200,
     )
 

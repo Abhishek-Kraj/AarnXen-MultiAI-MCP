@@ -42,10 +42,10 @@ async def chat_handler(
         cascade: Smart routing with auto-escalation. Only works when model="auto".
     """
     deps = ctx.request_context.lifespan_context
-    registry = deps["registry"]
-    cache = deps["cache"]
-    cost_tracker = deps["cost_tracker"]
-    memory = deps["memory"]
+    registry = deps.registry
+    cache = deps.cache
+    cost_tracker = deps.cost_tracker
+    memory = deps.memory
 
     # Smart cascade mode: classify, route, escalate if needed
     if cascade and (not model or model == "auto"):
@@ -166,7 +166,7 @@ async def chat_handler(
 def _auto_extract(deps, prompt: str):
     """Extract entities/relations from the prompt and store in the knowledge base."""
     try:
-        kb = deps.get("knowledge") if isinstance(deps, dict) else getattr(deps, "knowledge", None)
+        kb = getattr(deps, "knowledge", None)
         if not kb:
             return
         extractor = EntityExtractor(knowledge_base=kb)

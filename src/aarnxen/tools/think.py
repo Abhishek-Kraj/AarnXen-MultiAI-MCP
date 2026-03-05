@@ -60,8 +60,8 @@ async def think_handler(
         depth: Reasoning depth — "light", "medium", or "deep". Affects token budget.
     """
     deps = ctx.request_context.lifespan_context
-    registry = deps["registry"]
-    cost_tracker = deps["cost_tracker"]
+    registry = deps.registry
+    cost_tracker = deps.cost_tracker
 
     provider, resolved_model = registry.resolve(model)
 

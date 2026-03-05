@@ -86,7 +86,7 @@ def _add_env_providers(cfg: AarnXenConfig) -> None:
     existing = {p.name for p in cfg.providers}
 
     env_providers = [
-        ("gemini", "GEMINI_API_KEY", 1, ["gemini-2.5-flash"]),
+        ("gemini", "GEMINI_API_KEY", 1, ["gemini-2.5-flash", "gemini-2.5-pro"]),
         ("openai", "OPENAI_API_KEY", 2, ["gpt-4o"]),
         ("groq", "GROQ_API_KEY", 3, ["llama-3.3-70b-versatile"]),
         ("openrouter", "OPENROUTER_API_KEY", 4, []),

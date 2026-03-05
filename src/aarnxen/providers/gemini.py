@@ -13,7 +13,7 @@ class GeminiProvider(BaseProvider):
 
     def __init__(self, api_key: str, models: list[str] = None, timeout: int = 120):
         self._client = genai.Client(api_key=api_key)
-        self._models = models or ["gemini-2.5-flash"]
+        self._models = models or ["gemini-2.5-flash", "gemini-2.5-pro"]
         self._timeout = timeout
 
     async def generate(
@@ -57,14 +57,26 @@ class GeminiProvider(BaseProvider):
             latency_ms=elapsed,
         )
 
+    def _model_pricing(self, m: str) -> tuple[float, float, int]:
+        """Return (input_price, output_price, context_window) for a Gemini model."""
+        if "3.1-pro" in m:
+            return 1.25, 10.00, 1_048_576
+        if "3.1-flash-lite" in m or "3-flash" in m:
+            return 0.075, 0.30, 1_048_576
+        if "2.5-flash-lite" in m:
+            return 0.025, 0.10, 1_048_576
+        if "pro" in m:
+            return 1.25, 10.00, 1_048_576
+        return 0.15, 0.60, 1_048_576
+
     def list_models(self) -> list[ModelCapability]:
         return [
             ModelCapability(
                 model_id=m,
                 display_name=m,
-                max_context=1_048_576 if "pro" in m else 1_048_576,
-                input_price_per_m=1.25 if "pro" in m else 0.15,
-                output_price_per_m=5.00 if "pro" in m else 0.60,
+                max_context=self._model_pricing(m)[2],
+                input_price_per_m=self._model_pricing(m)[0],
+                output_price_per_m=self._model_pricing(m)[1],
             )
             for m in self._models
         ]

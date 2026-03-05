@@ -19,8 +19,8 @@ async def codereview_handler(
         focus: Review focus — "general", "security", "performance", or "bugs".
     """
     deps = ctx.request_context.lifespan_context
-    registry = deps["registry"]
-    cost_tracker = deps["cost_tracker"]
+    registry = deps.registry
+    cost_tracker = deps.cost_tracker
 
     provider, resolved_model = registry.resolve(model)
 

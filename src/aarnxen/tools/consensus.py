@@ -23,9 +23,9 @@ async def consensus_handler(
         system_prompt: Optional system instructions applied to all models.
     """
     deps = ctx.request_context.lifespan_context
-    registry = deps["registry"]
-    cache = deps["cache"]
-    cost_tracker = deps["cost_tracker"]
+    registry = deps.registry
+    cache = deps.cache
+    cost_tracker = deps.cost_tracker
 
     # Resolve models
     if models == "auto":

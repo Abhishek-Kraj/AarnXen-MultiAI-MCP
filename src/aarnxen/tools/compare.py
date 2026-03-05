@@ -25,8 +25,8 @@ async def compare_handler(
         system_prompt: Optional system instructions.
     """
     deps = ctx.request_context.lifespan_context
-    registry = deps["registry"]
-    cost_tracker = deps["cost_tracker"]
+    registry = deps.registry
+    cost_tracker = deps.cost_tracker
 
     # Resolve models
     top = registry.get_top_n_models(2)
