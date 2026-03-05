@@ -12,18 +12,6 @@ def validate_prompt(prompt: str, max_length: int = 100_000) -> str:
     return cleaned
 
 
-def validate_model(model: str, available_models: set[str]) -> str:
-    cleaned = model.strip().lower()
-    if cleaned == "auto":
-        return cleaned
-    if cleaned not in available_models:
-        sample = sorted(available_models)[:5]
-        raise ValueError(
-            f"Unknown model '{cleaned}'. Available models include: {', '.join(sample)}"
-        )
-    return cleaned
-
-
 def validate_temperature(temp: float) -> float:
     return max(0.0, min(2.0, temp))
 

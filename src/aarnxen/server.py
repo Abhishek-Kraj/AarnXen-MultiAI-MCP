@@ -16,8 +16,11 @@ from aarnxen.core.conversation import ConversationMemory
 from aarnxen.core.cost import CostTracker
 from aarnxen.core.events import EventBus
 from aarnxen.core.extractor import EntityExtractor
+from aarnxen.core.guardrails import Guardrails
 from aarnxen.core.knowledge import KnowledgeBase
+from aarnxen.core.rate_limit import RateLimiter
 from aarnxen.core.router import SmartRouter
+from aarnxen.core.tool_middleware import tool_wrapper
 from aarnxen.providers.registry import ProviderRegistry
 
 logger = logging.getLogger("aarnxen")
@@ -34,6 +37,8 @@ class AppContext:
     extractor: EntityExtractor
     router: SmartRouter
     event_bus: EventBus
+    guardrails: Optional[Guardrails]
+    rate_limiter: Optional[RateLimiter]
     config: AarnXenConfig
 
 
@@ -61,6 +66,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     extractor = EntityExtractor(knowledge_base=knowledge)
     router = SmartRouter(registry, circuit_breaker=circuit_breaker)
     event_bus = EventBus()
+    guardrails = Guardrails()
+    rate_limiter = RateLimiter(max_calls=60, window_seconds=60.0)
 
     # Auto-start dashboard web UI in background thread
     dashboard_server = None
@@ -88,6 +95,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             extractor=extractor,
             router=router,
             event_bus=event_bus,
+            guardrails=guardrails,
+            rate_limiter=rate_limiter,
             config=cfg,
         )
     finally:
@@ -145,6 +154,17 @@ from aarnxen.tools.swarm import swarm_handler  # noqa: E402
 from aarnxen.tools.think import think_handler  # noqa: E402
 
 
+_chat_wrapped = tool_wrapper(chat_handler, "chat")
+_think_wrapped = tool_wrapper(think_handler, "think")
+_challenge_wrapped = tool_wrapper(challenge_handler, "challenge")
+_codereview_wrapped = tool_wrapper(codereview_handler, "codereview")
+_precommit_wrapped = tool_wrapper(precommit_handler, "precommit")
+_consensus_wrapped = tool_wrapper(consensus_handler, "consensus")
+_compare_wrapped = tool_wrapper(compare_handler, "compare")
+_swarm_wrapped = tool_wrapper(swarm_handler, "swarm")
+_pipeline_wrapped = tool_wrapper(pipeline_handler, "pipeline")
+
+
 @mcp.tool()
 async def chat(
     prompt: str,
@@ -156,7 +176,7 @@ async def chat(
     ctx: Context = None,
 ) -> dict:
     """Chat with any AI model (GPT, Gemini, Groq, Ollama). Use when you need a second opinion, want to delegate a question to a different model, or need to query an external AI. Set cascade=True for smart routing (tries cheap model first, escalates if needed). Returns the model's response with cost and token usage."""
-    return await chat_handler(prompt, model, temperature, system_prompt, conversation_id, cascade, ctx)
+    return await _chat_wrapped(prompt, model, temperature, system_prompt, conversation_id, cascade, ctx=ctx)
 
 
 @mcp.tool()
@@ -168,7 +188,7 @@ async def consensus(
     ctx: Context = None,
 ) -> dict:
     """Query multiple AI models in parallel and synthesize responses. Use when you need high-confidence answers, want to validate reasoning across models, or need diverse perspectives on a technical question. Returns all model responses for comparison."""
-    return await consensus_handler(prompt, models, temperature, system_prompt, ctx)
+    return await _consensus_wrapped(prompt, models, temperature, system_prompt, ctx=ctx)
 
 
 @mcp.tool()
@@ -181,7 +201,7 @@ async def compare(
     ctx: Context = None,
 ) -> dict:
     """Compare two AI models side-by-side. Use when you want to see how different models handle the same prompt, or benchmark model quality for a specific task."""
-    return await compare_handler(prompt, model_a, model_b, temperature, system_prompt, ctx)
+    return await _compare_wrapped(prompt, model_a, model_b, temperature, system_prompt, ctx=ctx)
 
 
 @mcp.tool()
@@ -192,7 +212,7 @@ async def think(
     ctx: Context = None,
 ) -> dict:
     """Deep reasoning — delegates complex analysis to an external AI model for step-by-step thinking. Use for architecture decisions, debugging strategies, trade-off analysis, or any problem that benefits from extended reasoning. Depth: light/medium/deep."""
-    return await think_handler(prompt, model, depth, ctx)
+    return await _think_wrapped(prompt, model, depth, ctx=ctx)
 
 
 @mcp.tool()
@@ -204,7 +224,7 @@ async def codereview(
     ctx: Context = None,
 ) -> dict:
     """Review code for bugs, style, performance, and security using an external AI model. Use before committing code, during pull request review, or when you want a second opinion on code quality. Supports focus areas: general, security, performance, bugs."""
-    return await codereview_handler(code, language, model, focus, ctx)
+    return await _codereview_wrapped(code, language, model, focus, ctx=ctx)
 
 
 @mcp.tool()
@@ -214,7 +234,7 @@ async def precommit(
     ctx: Context = None,
 ) -> dict:
     """Validate code changes before committing. Pass a git diff to catch bugs, security vulnerabilities, performance issues, and style problems. Returns a PASS/FAIL verdict with specific issues found. Use this before every git commit."""
-    return await precommit_handler(diff, model, ctx)
+    return await _precommit_wrapped(diff, model, ctx=ctx)
 
 
 @mcp.tool()
@@ -225,7 +245,7 @@ async def challenge(
     ctx: Context = None,
 ) -> dict:
     """Challenge a claim or approach with critical analysis from another AI model. Use when you want to stress-test your reasoning, find flaws in a plan, or get a devil's advocate perspective before proceeding. Returns STRONG/MODERATE/WEAK verdict."""
-    return await challenge_handler(claim, evidence, model, ctx)
+    return await _challenge_wrapped(claim, evidence, model, ctx=ctx)
 
 
 @mcp.tool()
@@ -234,7 +254,7 @@ async def pipeline(
     ctx: Context = None,
 ) -> dict:
     """Execute a pipeline of AarnXen tools in sequence. Each step's output feeds the next via $PREV. Example: [{"tool": "think", "args": {"prompt": "analyze X", "depth": "deep"}}, {"tool": "challenge", "args": {"claim": "$PREV"}}]. Available tools: chat, think, challenge, codereview, precommit."""
-    return await pipeline_handler(steps, ctx)
+    return await _pipeline_wrapped(steps, ctx=ctx)
 
 
 @mcp.tool()
@@ -246,7 +266,7 @@ async def swarm(
     ctx: Context = None,
 ) -> dict:
     """Launch multiple AI agents in parallel on different sub-tasks. Use when you need to break a complex problem into sub-tasks, get N independent analyses, or run parallel code reviews. Pass a JSON array of task objects with "prompt" and optional "model", "system_prompt", "label". Max 100 agents, default concurrency 10. Set max_budget_usd to limit total spend (0.0 = unlimited); agents are cancelled once budget is exceeded and partial results are returned."""
-    return await swarm_handler(tasks, model, concurrency, max_budget_usd, ctx)
+    return await _swarm_wrapped(tasks, model, concurrency, max_budget_usd, ctx=ctx)
 
 
 @mcp.tool()

@@ -8,7 +8,6 @@ from aarnxen.core.validation import (
     sanitize_system_prompt,
     truncate_response,
     validate_json_input,
-    validate_model,
     validate_prompt,
     validate_temperature,
 )
@@ -26,16 +25,6 @@ def test_validate_prompt_rejects_empty():
 def test_validate_prompt_rejects_too_long():
     with pytest.raises(ValueError, match="exceeds maximum length"):
         validate_prompt("a" * 101, max_length=100)
-
-
-def test_validate_model_auto_always_valid():
-    assert validate_model("  Auto  ", set()) == "auto"
-
-
-def test_validate_model_rejects_unknown():
-    available = {"gpt-4", "claude-3", "gemini-pro"}
-    with pytest.raises(ValueError, match="Unknown model"):
-        validate_model("gpt-5", available)
 
 
 def test_validate_temperature_clamps():
