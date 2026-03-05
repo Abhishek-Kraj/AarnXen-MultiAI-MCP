@@ -1,47 +1,95 @@
 # AarnXen Multi-AI MCP Server Configuration
 # Copy to ~/.aarnxen/config.yaml and fill in your API keys
+#
+# Quick start (Gemini only — free tier):
+#   1. Get a key at https://aistudio.google.com/apikey
+#   2. Set GEMINI_API_KEY in your environment
+#   3. Uncomment the gemini provider below
+#
+# You only need ONE provider to get started. Add more as needed.
 
 default_model: "auto"
 default_temperature: 0.7
 log_level: "INFO"
 
 providers:
+  # --- Google Gemini (recommended, free tier available) ---
   - name: gemini
     api_key_env: GEMINI_API_KEY
     priority: 1
-    models: [gemini-3.1-pro, gemini-3.1-flash, gemini-2.5-pro, gemini-2.5-flash]
+    models:
+      # Latest preview models
+      - gemini-3.1-pro-preview      # Best for deep reasoning & code
+      - gemini-3-flash-preview       # Fast balanced
+      # Stable models
+      - gemini-2.5-pro              # Premium stable
+      - gemini-2.5-flash            # Fast stable
+      - gemini-2.5-flash-lite       # Ultra-fast budget
     timeout_seconds: 120
 
+  # --- Ollama Cloud (free, 20+ models) ---
+  # Get a key at https://ollama.com/settings/keys
   - name: ollama-cloud
     base_url: "https://ollama.com"
     api_key_env: OLLAMA_CLOUD_KEY
     priority: 2
-    models: [llama3.2]
-    timeout_seconds: 180
-
-  - name: ollama-local
-    base_url: "http://localhost:11434"
-    priority: 10
-    models: []  # auto-discover from running Ollama
+    models:
+      # Top tier
+      - deepseek-v3.2
+      - kimi-k2:1t-cloud
+      - kimi-k2.5
+      - kimi-k2-thinking
+      - glm-5
+      - minimax-m2.5
+      # Code specialists
+      - qwen3-coder-next:latest
+      - devstral-2:123b-cloud
+      - devstral-small-2:24b-cloud
+      # Large models
+      - qwen3.5:397b-cloud
+      - qwen3-next:80b-cloud
+      - qwen3-vl:235b-cloud
+      - cogito-2.1:671b-cloud
+      - mistral-large-3:675b-cloud
+      - deepseek-v3.1:671b-cloud
+      - gpt-oss:120b-cloud
+      # Budget
+      - gpt-oss:20b-cloud
+      - glm-4.7
+      - glm-4.6
+      - minimax-m2
+      - minimax-m2.1
     timeout_seconds: 300
 
-  - name: openai
-    api_key_env: OPENAI_API_KEY
-    priority: 3
-    models: [gpt-4o, o3]
-    timeout_seconds: 90
+  # --- Ollama Local (no key needed, requires Ollama running locally) ---
+  # Install from https://ollama.com/download
+  # - name: ollama-local
+  #   base_url: "http://localhost:11434"
+  #   priority: 10
+  #   models: []  # auto-discovers from running Ollama
+  #   timeout_seconds: 300
 
-  - name: groq
-    api_key_env: GROQ_API_KEY
-    priority: 4
-    models: [llama-3.3-70b-versatile, mixtral-8x7b-32768]
-    timeout_seconds: 30
+  # --- OpenAI (optional, paid) ---
+  # - name: openai
+  #   api_key_env: OPENAI_API_KEY
+  #   priority: 3
+  #   models: [gpt-4o, gpt-4o-mini, o3]
+  #   timeout_seconds: 90
 
-  - name: openrouter
-    api_key_env: OPENROUTER_API_KEY
-    priority: 5
-    models: []  # all available
-    timeout_seconds: 120
+  # --- Groq (optional, free tier available) ---
+  # Get a key at https://console.groq.com/keys
+  # - name: groq
+  #   api_key_env: GROQ_API_KEY
+  #   priority: 4
+  #   models: [llama-3.3-70b-versatile, mixtral-8x7b-32768]
+  #   timeout_seconds: 30
+
+  # --- OpenRouter (optional, 100+ models via single key) ---
+  # - name: openrouter
+  #   api_key_env: OPENROUTER_API_KEY
+  #   priority: 5
+  #   models: []  # all available
+  #   timeout_seconds: 120
 
 cache:
   enabled: true
