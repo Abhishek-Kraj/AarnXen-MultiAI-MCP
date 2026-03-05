@@ -19,6 +19,7 @@ vectors = ["sentence-transformers>=3.0.0"]
 
 [project.scripts]
 aarnxen = "aarnxen.server:main"
+aarnxen-dashboard = "aarnxen.dashboard:main"
 
 [build-system]
 requires = ["setuptools>=75.0"]
