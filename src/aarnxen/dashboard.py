@@ -34,6 +34,16 @@ def fmt_time(ts):
 
 # ── API handlers ──────────────────────────────────────────────
 
+def _extract_project(title):
+    """Extract [project-name] prefix from title, or infer from 'Alshaya EDH -' etc."""
+    if title.startswith("[") and "]" in title:
+        return title[1:title.index("]")]
+    for prefix in ("Alshaya EDH -", "AarnXen"):
+        if title.startswith(prefix):
+            return prefix.rstrip(" -")
+    return ""
+
+
 def api_stats():
     conn = get_db()
     docs = conn.execute("SELECT COUNT(*) c FROM documents").fetchone()["c"]
@@ -46,12 +56,20 @@ def api_stats():
     entity_types = conn.execute(
         "SELECT entity_type, COUNT(*) c FROM entities GROUP BY entity_type ORDER BY c DESC"
     ).fetchall()
+    # Project grouping
+    all_titles = conn.execute("SELECT title FROM documents").fetchall()
+    projects = {}
+    for r in all_titles:
+        p = _extract_project(r["title"])
+        if p:
+            projects[p] = projects.get(p, 0) + 1
     conn.close()
     return {
         "documents": docs, "entities": entities,
         "relations": relations, "observations": observations,
         "doc_types": {r["doc_type"]: r["c"] for r in doc_types},
         "entity_types": {r["entity_type"]: r["c"] for r in entity_types},
+        "projects": projects,
     }
 
 
