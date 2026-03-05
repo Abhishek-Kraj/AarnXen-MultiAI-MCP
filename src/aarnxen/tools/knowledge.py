@@ -51,6 +51,7 @@ async def kb_search_handler(
         query: Search query (supports natural language).
         limit: Max results to return.
     """
+    limit = min(max(1, limit), 50)
     deps = ctx.request_context.lifespan_context
     kb = deps.knowledge
     if not kb:
@@ -185,6 +186,7 @@ async def kb_search_index_handler(
         obs_type: Filter by type (e.g., "bugfix", "decision", "feature").
         session_id: Filter by session ID.
     """
+    limit = min(max(1, limit), 100)
     deps = ctx.request_context.lifespan_context
     kb = deps.knowledge
     if not kb:

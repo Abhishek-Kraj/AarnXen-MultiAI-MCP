@@ -2,6 +2,9 @@
 
 from mcp.server.fastmcp import Context
 
+from aarnxen.core.retry import call_with_retry
+from aarnxen.core.validation import validate_prompt, truncate_response
+
 
 async def challenge_handler(
     claim: str,
@@ -9,16 +12,12 @@ async def challenge_handler(
     model: str = "auto",
     ctx: Context = None,
 ) -> dict:
-    """Critically evaluate a claim or approach — find flaws, weaknesses, and blind spots.
-
-    Args:
-        claim: The claim or approach to challenge.
-        evidence: Optional supporting evidence to also evaluate.
-        model: Model to use for analysis.
-    """
+    """Critically evaluate a claim or approach — find flaws, weaknesses, and blind spots."""
     deps = ctx.request_context.lifespan_context
     registry = deps.registry
     cost_tracker = deps.cost_tracker
+
+    claim = validate_prompt(claim)
 
     provider, resolved_model = registry.resolve(model)
 
@@ -36,10 +35,14 @@ async def challenge_handler(
     if evidence:
         prompt += f"\n\nSupporting evidence: {evidence}"
 
-    response = await provider.generate(
-        prompt, resolved_model,
+    fallbacks = registry.get_fallbacks(resolved_model)
+    response = await call_with_retry(
+        provider, resolved_model, prompt,
         system_prompt=system_prompt,
         temperature=0.4,
+        fallback_providers=fallbacks,
+        circuit_breaker=deps.circuit_breaker,
+        max_retries=2,
     )
 
     cost_entry = cost_tracker.record(
@@ -56,7 +59,7 @@ async def challenge_handler(
         verdict = "MODERATE"
 
     return {
-        "result": response.text,
+        "result": truncate_response(response.text),
         "model": resolved_model,
         "provider": provider.provider_name(),
         "tokens": {"input": response.input_tokens, "output": response.output_tokens},

@@ -1,16 +1,4 @@
-"""Multi-agent swarm — launch N parallel agents on sub-tasks.
-
-Each agent gets its own prompt and model, runs independently,
-and results are gathered for synthesis. Ideal for:
-- Breaking a complex problem into sub-tasks
-- Getting N independent analyses of the same topic
-- Parallel code review across different focus areas
-- Brainstorming with diverse model perspectives
-
-Kimi K2 Thinking (256K ctx, 200-300 tool calls) and GLM-5 (744B)
-are ideal for complex agent tasks. Ollama Cloud subscription
-means launching 100 agents costs $0 in per-token fees.
-"""
+"""Multi-agent swarm — launch N parallel agents on sub-tasks."""
 
 import asyncio
 import json
@@ -20,10 +8,11 @@ import time
 from mcp.server.fastmcp import Context
 
 from aarnxen.core.errors import generation_failed
+from aarnxen.core.retry import call_with_retry
+from aarnxen.core.validation import validate_json_input, validate_prompt, truncate_response
 
 logger = logging.getLogger(__name__)
 
-# Default concurrency limit to avoid overwhelming providers
 DEFAULT_CONCURRENCY = 10
 MAX_AGENTS = 100
 
@@ -32,46 +21,40 @@ async def swarm_handler(
     tasks: str,
     model: str = "auto",
     concurrency: int = DEFAULT_CONCURRENCY,
+    max_budget_usd: float = 0.0,
     ctx: Context = None,
 ) -> dict:
-    """Launch multiple AI agents in parallel on different sub-tasks.
-
-    Args:
-        tasks: JSON array of task objects. Each has "prompt" and optional
-               "model", "system_prompt", "label".
-               Example: [
-                   {"prompt": "Analyze security of auth module", "label": "Security"},
-                   {"prompt": "Review performance of DB queries", "label": "Performance"},
-                   {"prompt": "Check error handling patterns", "label": "Error Handling"}
-               ]
-        model: Default model for all agents. Override per-task with task-level "model".
-        concurrency: Max agents running simultaneously (default 10, max 100).
-    """
+    """Launch multiple AI agents in parallel on different sub-tasks."""
     deps = ctx.request_context.lifespan_context
     registry = deps.registry
     cost_tracker = deps.cost_tracker
     cache = deps.cache
+    circuit_breaker = deps.circuit_breaker
 
     try:
-        task_list = json.loads(tasks)
-    except json.JSONDecodeError as exc:
-        return {"isError": True, "message": f"Invalid JSON: {exc}"}
-
-    if not isinstance(task_list, list) or not task_list:
-        return {"isError": True, "message": "Tasks must be a non-empty JSON array"}
-
-    if len(task_list) > MAX_AGENTS:
-        return {"isError": True, "message": f"Max {MAX_AGENTS} agents allowed, got {len(task_list)}"}
+        task_list = validate_json_input(tasks, max_items=MAX_AGENTS)
+    except ValueError as exc:
+        return {"isError": True, "message": str(exc)}
 
     concurrency = min(max(1, concurrency), MAX_AGENTS)
     semaphore = asyncio.Semaphore(concurrency)
     start_time = time.monotonic()
 
+    budget_enabled = max_budget_usd > 0
+    budget_lock = asyncio.Lock()
+    budget_spent = {"usd": 0.0, "exceeded": False, "cancelled": 0}
+
     async def run_agent(idx: int, task: dict) -> dict:
         async with semaphore:
+            if budget_enabled and budget_spent["exceeded"]:
+                label = task.get("label", f"Agent {idx + 1}")
+                async with budget_lock:
+                    budget_spent["cancelled"] += 1
+                return {"label": label, "isError": True, "message": "Budget exceeded, agent cancelled"}
             agent_model = task.get("model", model)
             agent_prompt = task.get("prompt", "")
             agent_system = task.get("system_prompt", "")
+            agent_temp = task.get("temperature", 0.7)
             label = task.get("label", f"Agent {idx + 1}")
 
             if not agent_prompt:
@@ -86,7 +69,7 @@ async def swarm_handler(
             if cache:
                 cached = cache.get(
                     provider.provider_name(), resolved,
-                    agent_prompt, agent_system, 0.7,
+                    agent_prompt, agent_system, agent_temp,
                 )
                 if cached:
                     cost_tracker.record(
@@ -97,7 +80,7 @@ async def swarm_handler(
                         "label": label,
                         "model": resolved,
                         "provider": provider.provider_name(),
-                        "response": cached.text,
+                        "response": truncate_response(cached.text),
                         "tokens": {"input": cached.input_tokens, "output": cached.output_tokens},
                         "cost_usd": 0.0,
                         "cached": True,
@@ -105,30 +88,41 @@ async def swarm_handler(
 
             try:
                 t0 = time.monotonic()
-                response = await provider.generate(
-                    agent_prompt, resolved,
+                fallbacks = registry.get_fallbacks(resolved)
+                response = await call_with_retry(
+                    provider, resolved, agent_prompt,
                     system_prompt=agent_system or None,
-                    temperature=0.7,
+                    temperature=agent_temp,
+                    fallback_providers=fallbacks,
+                    circuit_breaker=circuit_breaker,
+                    max_retries=2,
                 )
                 elapsed = (time.monotonic() - t0) * 1000
             except Exception as exc:
-                return {"label": label, "isError": True, "message": str(exc)}
+                logger.warning("Agent %s failed: %s", label, exc)
+                return {"label": label, "isError": True, "message": type(exc).__name__}
 
             if cache:
                 cache.put(
                     provider.provider_name(), resolved,
-                    agent_prompt, agent_system, 0.7, response,
+                    agent_prompt, agent_system, agent_temp, response,
                 )
             cost_entry = cost_tracker.record(
                 provider.provider_name(), resolved,
                 response.input_tokens, response.output_tokens,
             )
 
+            if budget_enabled:
+                async with budget_lock:
+                    budget_spent["usd"] += cost_entry.cost_usd
+                    if budget_spent["usd"] >= max_budget_usd:
+                        budget_spent["exceeded"] = True
+
             return {
                 "label": label,
                 "model": resolved,
                 "provider": provider.provider_name(),
-                "response": response.text,
+                "response": truncate_response(response.text),
                 "tokens": {"input": response.input_tokens, "output": response.output_tokens},
                 "cost_usd": round(cost_entry.cost_usd, 6),
                 "latency_ms": round(elapsed, 1),
@@ -170,7 +164,7 @@ async def swarm_handler(
     )
     wall_time = (time.monotonic() - start_time) * 1000
 
-    return {
+    result = {
         "agent_count": total,
         "responses": responses,
         "errors": errors if errors else None,
@@ -187,3 +181,13 @@ async def swarm_handler(
             "Highlight agreements, disagreements, and unique insights from each agent."
         ),
     }
+
+    if budget_enabled:
+        result["budget"] = {
+            "max_usd": max_budget_usd,
+            "spent_usd": round(budget_spent["usd"], 6),
+            "budget_exceeded": budget_spent["exceeded"],
+            "agents_cancelled": budget_spent["cancelled"],
+        }
+
+    return result

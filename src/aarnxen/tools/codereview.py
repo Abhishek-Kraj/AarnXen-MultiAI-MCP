@@ -2,6 +2,9 @@
 
 from mcp.server.fastmcp import Context
 
+from aarnxen.core.retry import call_with_retry
+from aarnxen.core.validation import validate_prompt, truncate_response
+
 
 async def codereview_handler(
     code: str,
@@ -10,17 +13,12 @@ async def codereview_handler(
     focus: str = "general",
     ctx: Context = None,
 ) -> dict:
-    """Review code for bugs, style, performance, and security issues.
-
-    Args:
-        code: The code to review (paste directly or file contents).
-        language: Programming language. "auto" to detect.
-        model: Model to use for review.
-        focus: Review focus — "general", "security", "performance", or "bugs".
-    """
+    """Review code for bugs, style, performance, and security issues."""
     deps = ctx.request_context.lifespan_context
     registry = deps.registry
     cost_tracker = deps.cost_tracker
+
+    code = validate_prompt(code, max_length=200_000)
 
     provider, resolved_model = registry.resolve(model)
 
@@ -44,11 +42,15 @@ async def codereview_handler(
     lang_hint = f" (Language: {language})" if language != "auto" else ""
     prompt = f"Review this code{lang_hint}:\n\n```\n{code}\n```"
 
-    response = await provider.generate(
-        prompt, resolved_model,
+    fallbacks = registry.get_fallbacks(resolved_model)
+    response = await call_with_retry(
+        provider, resolved_model, prompt,
         system_prompt=system_prompt,
         temperature=0.3,
         max_tokens=4096,
+        fallback_providers=fallbacks,
+        circuit_breaker=deps.circuit_breaker,
+        max_retries=2,
     )
 
     cost_entry = cost_tracker.record(
@@ -57,7 +59,7 @@ async def codereview_handler(
     )
 
     return {
-        "review": response.text,
+        "review": truncate_response(response.text),
         "model": resolved_model,
         "provider": provider.provider_name(),
         "focus": focus,

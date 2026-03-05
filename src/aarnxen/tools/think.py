@@ -2,6 +2,9 @@
 
 from mcp.server.fastmcp import Context
 
+from aarnxen.core.retry import call_with_retry
+from aarnxen.core.validation import validate_prompt, truncate_response
+
 DEPTH_CONFIG = {
     "light": {
         "temperature": 0.5,
@@ -63,6 +66,8 @@ async def think_handler(
     registry = deps.registry
     cost_tracker = deps.cost_tracker
 
+    prompt = validate_prompt(prompt)
+
     provider, resolved_model = registry.resolve(model)
 
     depth = _resolve_depth(depth)
@@ -70,11 +75,15 @@ async def think_handler(
 
     system_prompt = config["system_prompt"]
 
-    response = await provider.generate(
-        prompt, resolved_model,
+    fallbacks = registry.get_fallbacks(resolved_model)
+    response = await call_with_retry(
+        provider, resolved_model, prompt,
         system_prompt=system_prompt,
         temperature=config["temperature"],
         max_tokens=config["max_tokens"],
+        fallback_providers=fallbacks,
+        circuit_breaker=deps.circuit_breaker,
+        max_retries=2,
     )
 
     cost_entry = cost_tracker.record(
@@ -83,7 +92,7 @@ async def think_handler(
     )
 
     return {
-        "reasoning": response.text,
+        "reasoning": truncate_response(response.text),
         "model": resolved_model,
         "provider": provider.provider_name(),
         "depth": depth,

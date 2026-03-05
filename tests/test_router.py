@@ -15,6 +15,8 @@ def _make_registry(available_models=None):
 
     registry = MagicMock()
     registry.list_all_models.return_value = [{"model": m} for m in available_models]
+    registry.get_fallbacks.return_value = []
+    registry._model_to_provider = {m: "mock" for m in available_models}
 
     def resolve_side_effect(model=None):
         if not model or model == "auto":

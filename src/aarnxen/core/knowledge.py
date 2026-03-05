@@ -35,6 +35,14 @@ def _jaccard(a, b):
     return len(a & b) / len(a | b)
 
 
+def _sanitize_fts_query(query: str) -> str:
+    """Escape FTS5 special characters by quoting each term."""
+    terms = query.split()
+    if not terms:
+        return '""'
+    return " ".join(f'"{t.replace(chr(34), chr(34)+chr(34))}"' for t in terms)
+
+
 def _tokenize(text):
     return {w.lower().strip(".,;:!?\"'()[]{}") for w in text.split() if len(w) > 2}
 
@@ -116,6 +124,23 @@ class KnowledgeBase:
                 created_at REAL NOT NULL,
                 FOREIGN KEY (entity_id) REFERENCES entities(id)
             );
+
+            -- FTS5 index for observations (fast search instead of LIKE)
+            CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
+                content,
+                content=observations,
+                content_rowid=rowid
+            );
+
+            CREATE TRIGGER IF NOT EXISTS observations_ai AFTER INSERT ON observations BEGIN
+                INSERT INTO observations_fts(rowid, content)
+                VALUES (new.rowid, new.content);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS observations_ad AFTER DELETE ON observations BEGIN
+                INSERT INTO observations_fts(observations_fts, rowid, content)
+                VALUES ('delete', old.rowid, old.content);
+            END;
         """)
 
     def _init_embeddings(self):
@@ -164,6 +189,23 @@ class KnowledgeBase:
         for table, column, coldef in migrations:
             if not self._has_column(table, column):
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
+
+        # Backfill observations FTS5 index if empty
+        try:
+            fts_count = self._conn.execute(
+                "SELECT COUNT(*) FROM observations_fts"
+            ).fetchone()[0]
+            obs_count = self._conn.execute(
+                "SELECT COUNT(*) FROM observations"
+            ).fetchone()[0]
+            if obs_count > 0 and fts_count == 0:
+                self._conn.execute(
+                    "INSERT INTO observations_fts(rowid, content) "
+                    "SELECT rowid, content FROM observations"
+                )
+        except Exception:
+            pass
+
         self._conn.commit()
 
     # --- Document Operations ---
@@ -207,7 +249,7 @@ class KnowledgeBase:
             fts_row = self._conn.execute(
                 "SELECT rank FROM documents_fts f JOIN documents d ON d.rowid = f.rowid "
                 "WHERE documents_fts MATCH ? AND d.id = ?",
-                (query, doc_id),
+                (_sanitize_fts_query(query), doc_id),
             ).fetchone()
             relevance = -fts_row[0] if fts_row else 0.0
             # Normalize: FTS5 rank is negative, closer to 0 = less relevant
@@ -242,7 +284,7 @@ class KnowledgeBase:
                 "JOIN documents d ON d.rowid = f.rowid "
                 "WHERE documents_fts MATCH ? AND d.scope = ? "
                 "LIMIT ?",
-                (query, scope, limit * 3),
+                (_sanitize_fts_query(query), scope, limit * 3),
             ).fetchall()
         else:
             rows = self._conn.execute(
@@ -252,7 +294,7 @@ class KnowledgeBase:
                 "JOIN documents d ON d.rowid = f.rowid "
                 "WHERE documents_fts MATCH ? "
                 "LIMIT ?",
-                (query, limit * 3),
+                (_sanitize_fts_query(query), limit * 3),
             ).fetchall()
 
         # Score each result
@@ -466,7 +508,16 @@ class KnowledgeBase:
 
     def search_observations_index(self, query: str, limit: int = 20,
                                    obs_type: str = None, session_id: str = None) -> list[dict]:
-        """Layer 1: Lightweight observation search — returns IDs + snippets."""
+        """Layer 1: Lightweight observation search — uses FTS5 with LIKE fallback."""
+        # Try FTS5 first (fast ranked search)
+        try:
+            rows = self._search_observations_fts(query, limit, obs_type, session_id)
+            if rows:
+                return rows
+        except Exception:
+            pass
+
+        # Fallback to LIKE for queries FTS5 can't handle (e.g., partial words)
         conditions = ["(o.content LIKE ? OR e.name LIKE ?)"]
         params = [f"%{query}%", f"%{query}%"]
         if obs_type:
@@ -483,6 +534,32 @@ class KnowledgeBase:
             f"WHERE {where} ORDER BY o.created_at DESC LIMIT ?",
             params,
         ).fetchall()
+        return [
+            {"id": r[0], "entity": r[1], "snippet": r[2][:80],
+             "obs_type": r[3] or "general", "created_at": r[4], "session_id": r[5] or ""}
+            for r in rows
+        ]
+
+    def _search_observations_fts(self, query: str, limit: int,
+                                  obs_type: str = None, session_id: str = None) -> list[dict]:
+        """FTS5-based observation search."""
+        base_sql = (
+            "SELECT o.id, e.name, o.content, o.obs_type, o.created_at, o.session_id "
+            "FROM observations_fts f "
+            "JOIN observations o ON o.rowid = f.rowid "
+            "JOIN entities e ON e.id = o.entity_id "
+            "WHERE observations_fts MATCH ?"
+        )
+        params = [_sanitize_fts_query(query)]
+        if obs_type:
+            base_sql += " AND o.obs_type = ?"
+            params.append(obs_type)
+        if session_id:
+            base_sql += " AND o.session_id = ?"
+            params.append(session_id)
+        base_sql += " ORDER BY rank LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(base_sql, params).fetchall()
         return [
             {"id": r[0], "entity": r[1], "snippet": r[2][:80],
              "obs_type": r[3] or "general", "created_at": r[4], "session_id": r[5] or ""}
@@ -554,9 +631,17 @@ class KnowledgeBase:
         query_emb = self._embed(query)
         if not query_emb:
             return fts_results
+
+        # Only load embeddings for FTS5-matched docs (not full table scan)
+        fts_ids = [r["id"] for r in fts_results]
+        if not fts_ids:
+            return fts_results
+        placeholders = ",".join("?" for _ in fts_ids)
         rows = self._conn.execute(
-            "SELECT id, embedding FROM documents WHERE embedding IS NOT NULL"
+            f"SELECT id, embedding FROM documents WHERE id IN ({placeholders}) AND embedding IS NOT NULL",
+            fts_ids,
         ).fetchall()
+
         vec_scores = {}
         for doc_id, emb_blob in rows:
             if emb_blob:
@@ -574,28 +659,36 @@ class KnowledgeBase:
 
     # --- Memory Deduplication & Consolidation ---
 
-    def deduplicate(self, similarity_threshold=0.8):
+    def deduplicate(self, similarity_threshold=0.8, max_docs=500):
+        """Deduplicate documents using Jaccard similarity. Capped to max_docs for performance."""
         rows = self._conn.execute(
-            "SELECT id, title, content, importance FROM documents ORDER BY importance DESC",
+            "SELECT id, title, content, importance FROM documents "
+            "ORDER BY importance DESC LIMIT ?",
+            (max_docs,),
         ).fetchall()
+
+        if len(rows) < 2:
+            return 0
 
         merged_count = 0
         deleted_ids = set()
 
+        # Pre-tokenize all documents once (avoid re-tokenizing in inner loop)
+        tokenized = [_tokenize(f"{r[1]} {r[2]}") for r in rows]
+
         for i in range(len(rows)):
             if rows[i][0] in deleted_ids:
                 continue
-            tokens_i = _tokenize(f"{rows[i][1]} {rows[i][2]}")
+            tokens_i = tokenized[i]
+            if not tokens_i:
+                continue
             for j in range(i + 1, len(rows)):
                 if rows[j][0] in deleted_ids:
                     continue
-                tokens_j = _tokenize(f"{rows[j][1]} {rows[j][2]}")
-                sim = _jaccard(tokens_i, tokens_j)
+                sim = _jaccard(tokens_i, tokenized[j])
                 if sim >= similarity_threshold:
-                    # Keep rows[i] (higher importance due to ORDER BY), merge content from rows[j]
                     keep_id = rows[i][0]
                     drop_id = rows[j][0]
-                    # Append unique content from the duplicate
                     keep_doc = self.get_document(keep_id)
                     drop_doc = self.get_document(drop_id)
                     if keep_doc and drop_doc:

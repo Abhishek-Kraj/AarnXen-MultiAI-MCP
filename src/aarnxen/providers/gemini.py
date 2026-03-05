@@ -1,5 +1,6 @@
 """Google Gemini provider using native SDK."""
 
+import base64
 import time
 from typing import Optional
 
@@ -24,6 +25,7 @@ class GeminiProvider(BaseProvider):
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
+        images: Optional[list[dict]] = None,
     ) -> ModelResponse:
         start = time.monotonic()
 
@@ -34,9 +36,21 @@ class GeminiProvider(BaseProvider):
         if system_prompt:
             config.system_instruction = system_prompt
 
-        response = self._client.models.generate_content(
+        if images:
+            parts = []
+            for img in images:
+                parts.append(types.Part.from_bytes(
+                    data=base64.b64decode(img["data"]),
+                    mime_type=img["mime_type"],
+                ))
+            parts.append(types.Part.from_text(text=prompt))
+            contents = parts
+        else:
+            contents = prompt
+
+        response = await self._client.aio.models.generate_content(
             model=model,
-            contents=prompt,
+            contents=contents,
             config=config,
         )
 
@@ -86,7 +100,7 @@ class GeminiProvider(BaseProvider):
 
     async def health_check(self) -> bool:
         try:
-            self._client.models.generate_content(
+            await self._client.aio.models.generate_content(
                 model=self._models[0],
                 contents="ping",
                 config=types.GenerateContentConfig(max_output_tokens=5),

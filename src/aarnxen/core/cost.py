@@ -1,6 +1,7 @@
 """Token counting and cost tracking."""
 
 import time
+from collections import deque
 from dataclasses import dataclass
 
 from aarnxen.pricing.models import get_pricing
@@ -19,7 +20,7 @@ class RequestCost:
 
 class CostTracker:
     def __init__(self):
-        self._requests: list[RequestCost] = []
+        self._requests: deque[RequestCost] = deque(maxlen=10000)
         self._session_start = time.time()
 
     def record(

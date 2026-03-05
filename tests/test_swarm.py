@@ -28,6 +28,7 @@ def _make_ctx(response=None, cache_hit=False):
 
     registry = MagicMock()
     registry.resolve.return_value = (provider, "test-model")
+    registry.get_fallbacks.return_value = []
 
     cost_tracker = MagicMock()
     cost_tracker.record.return_value = cost_entry
@@ -38,11 +39,14 @@ def _make_ctx(response=None, cache_hit=False):
     else:
         cache.get.return_value = None
 
-    # swarm.py uses attribute access (deps.registry), so use a namespace object
+    circuit_breaker = MagicMock()
+    circuit_breaker.can_execute.return_value = True
+
     deps = MagicMock()
     deps.registry = registry
     deps.cost_tracker = cost_tracker
     deps.cache = cache
+    deps.circuit_breaker = circuit_breaker
 
     ctx = MagicMock()
     ctx.request_context.lifespan_context = deps
@@ -63,14 +67,14 @@ class TestSwarmValidation:
         ctx, _, _ = _make_ctx()
         result = await swarm_handler("[]", ctx=ctx)
         assert result["isError"] is True
-        assert "non-empty" in result["message"]
+        assert "empty" in result["message"].lower()
 
     @pytest.mark.asyncio
     async def test_not_array(self):
         ctx, _, _ = _make_ctx()
         result = await swarm_handler('{"prompt": "hi"}', ctx=ctx)
         assert result["isError"] is True
-        assert "non-empty" in result["message"]
+        assert "array" in result["message"].lower()
 
     @pytest.mark.asyncio
     async def test_too_many_agents(self):
@@ -156,9 +160,12 @@ class TestSwarmExecution:
         deps = MagicMock()
         deps.registry = MagicMock()
         deps.registry.resolve.return_value = (provider, "test-model")
+        deps.registry.get_fallbacks.return_value = []
         deps.cost_tracker = MagicMock()
         deps.cache = MagicMock()
         deps.cache.get.return_value = None
+        deps.circuit_breaker = MagicMock()
+        deps.circuit_breaker.can_execute.return_value = True
 
         ctx = MagicMock()
         ctx.request_context.lifespan_context = deps
@@ -169,7 +176,7 @@ class TestSwarmExecution:
 
         assert result["summary"]["succeeded"] == 0
         assert result["summary"]["failed"] == 1
-        assert "provider down" in result["errors"][0]["error"]
+        assert result["errors"][0]["error"]  # sanitized error (class name only)
 
 
 class TestSwarmCaching:

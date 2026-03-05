@@ -23,7 +23,9 @@ def _make_ctx(response_text="The claim has merit. Verdict: MODERATE"):
 
     deps = MagicMock()
     deps.registry.resolve.return_value = (provider, "test-model")
+    deps.registry.get_fallbacks.return_value = []
     deps.cost_tracker.record.return_value = cost_entry
+    deps.circuit_breaker.can_execute.return_value = True
 
     ctx = MagicMock()
     ctx.request_context.lifespan_context = deps

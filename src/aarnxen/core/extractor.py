@@ -7,6 +7,10 @@ conversation text using regex + keyword matching. No external NLP libraries need
 import re
 from typing import Optional
 
+# Single-char or very short terms that cause excessive false positives.
+# These only match when followed by specific context (e.g., "C language", "R package").
+_AMBIGUOUS_SHORT_TERMS = frozenset({"c", "r", "v", "go"})
+
 
 # Comprehensive tech terms — frozenset for O(1) case-insensitive lookup
 _TECH_TERMS = frozenset(t.lower() for t in [
@@ -200,13 +204,25 @@ class EntityExtractor:
         result = self.extract(text)
         stats = {"entities_added": 0, "entities_reinforced": 0, "relations_added": 0}
 
+        if not result["entities"] and not result["relations"]:
+            return stats
+
+        # Batch: get all existing entity names in one query
+        existing_names = set()
+        try:
+            rows = self.kb._conn.execute(
+                "SELECT LOWER(name) FROM entities"
+            ).fetchall()
+            existing_names = {r[0] for r in rows}
+        except Exception:
+            pass
+
         for ent in result["entities"]:
-            existing = self.kb.search_entities(ent["name"])
-            exact = [e for e in existing if e["name"].lower() == ent["name"].lower()]
-            if exact:
+            if ent["name"].lower() in existing_names:
                 stats["entities_reinforced"] += 1
             else:
                 self.kb.add_entity(ent["name"], ent["type"])
+                existing_names.add(ent["name"].lower())
                 stats["entities_added"] += 1
 
         for rel in result["relations"]:
@@ -222,7 +238,6 @@ class EntityExtractor:
         # Check multi-word terms first
         for term in self._multi_word_terms:
             if term in text_lower:
-                # Find the original-case version in the text
                 idx = text_lower.index(term)
                 original = text[idx:idx + len(term)]
                 found.append({"name": _normalize_tech(original), "type": "technology"})
@@ -230,7 +245,12 @@ class EntityExtractor:
         # Tokenize and check single words — include dots, plus, hash for C++, C#, Next.js etc.
         for match in re.finditer(r'[A-Za-z][A-Za-z0-9.+#-]*', text):
             token = match.group()
-            if token.lower() in self._tech_terms:
+            token_lower = token.lower()
+            if token_lower in self._tech_terms:
+                # Skip ambiguous short terms unless they have qualifying context
+                if token_lower in _AMBIGUOUS_SHORT_TERMS:
+                    if not _has_tech_context(text, match.start(), match.end(), token_lower):
+                        continue
                 name = _normalize_tech(token)
                 if not any(f["name"].lower() == name.lower() for f in found):
                     found.append({"name": name, "type": "technology"})
@@ -330,6 +350,29 @@ class EntityExtractor:
                                     found.append(rel)
 
         return found
+
+
+_TECH_CONTEXT_WORDS = frozenset({
+    "language", "programming", "code", "compiler", "library", "package",
+    "framework", "runtime", "syntax", "function", "module", "script",
+    "codebase", "project", "build", "compile", "import", "version",
+})
+
+
+def _has_tech_context(text: str, start: int, end: int, term: str) -> bool:
+    """Check if an ambiguous short term (C, R, V, Go) has programming context nearby."""
+    # Check 60 chars before and after
+    window_start = max(0, start - 60)
+    window_end = min(len(text), end + 60)
+    window = text[window_start:window_end].lower()
+    for ctx_word in _TECH_CONTEXT_WORDS:
+        if ctx_word in window:
+            return True
+    # Special patterns: "in C", "using C", "written in Go"
+    before = text[max(0, start - 15):start].lower().strip()
+    if before.endswith(("in", "using", "with", "of", "the")):
+        return True
+    return False
 
 
 def _normalize_tech(token: str) -> str:

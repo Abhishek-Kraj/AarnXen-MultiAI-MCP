@@ -5,6 +5,8 @@ import logging
 
 from mcp.server.fastmcp import Context
 
+from aarnxen.core.validation import validate_json_input
+
 logger = logging.getLogger(__name__)
 
 # Map tool names to their handler functions and required args
@@ -40,12 +42,9 @@ async def pipeline_handler(
                ]
     """
     try:
-        step_list = json.loads(steps)
-    except json.JSONDecodeError as exc:
-        return {"isError": True, "message": f"Invalid JSON in steps: {exc}"}
-
-    if not isinstance(step_list, list) or not step_list:
-        return {"isError": True, "message": "Steps must be a non-empty JSON array"}
+        step_list = validate_json_input(steps)
+    except ValueError as exc:
+        return {"isError": True, "message": str(exc)}
 
     results = []
     prev_text = ""

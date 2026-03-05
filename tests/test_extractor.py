@@ -16,6 +16,10 @@ def extractor():
 def mock_kb():
     kb = MagicMock()
     kb.search_entities.return_value = []
+    # Simulate the batch entity lookup in extract_and_store
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    kb._conn.execute.return_value = mock_cursor
     return kb
 
 
@@ -256,7 +260,10 @@ class TestExtractAndStore:
         assert mock_kb.add_entity.call_count >= 2
 
     def test_reinforces_existing(self, extractor_with_kb, mock_kb):
-        mock_kb.search_entities.return_value = [{"name": "FastAPI", "type": "technology"}]
+        # Simulate FastAPI already existing in the database
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [("fastapi",)]
+        mock_kb._conn.execute.return_value = mock_cursor
         stats = extractor_with_kb.extract_and_store("I'm building with FastAPI")
         assert stats["entities_reinforced"] >= 1
 

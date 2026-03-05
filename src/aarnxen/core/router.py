@@ -4,23 +4,26 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from aarnxen.providers.base import ModelResponse
 from aarnxen.providers.registry import ProviderRegistry
+
+if TYPE_CHECKING:
+    from aarnxen.core.circuit_breaker import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
 TIERS = {
     # Budget: fast, lightweight — simple Q&A, greetings, short answers
     "budget": [
-        "glm-4.7", "qwen3.5:397b-cloud", "gemini-2.5-flash",
-        "gemini-2.5-flash-lite", "minimax-m2", "minimax-m2.1",
+        "gemini-3.1-flash-lite-preview", "glm-4.7", "qwen3.5:397b-cloud",
+        "gemini-2.5-flash", "gemini-2.5-flash-lite", "minimax-m2", "minimax-m2.1",
     ],
     # Balanced: strong general-purpose — creative, general knowledge, moderate coding
     "balanced": [
-        "kimi-k2.5", "glm-5", "deepseek-v3.2", "qwen3-next:80b-cloud", "glm-4.7",
-        "gemini-2.5-pro", "gpt-4o-mini",
+        "gemini-3-flash-preview", "kimi-k2.5", "glm-5", "deepseek-v3.2",
+        "qwen3-next:80b-cloud", "glm-4.7", "gemini-2.5-pro", "gpt-4o-mini",
     ],
     # Premium: frontier-class — coding, reasoning, complex analysis
     "premium": [
@@ -88,8 +91,13 @@ LOW_QUALITY_PHRASES = [
 
 class SmartRouter:
 
-    def __init__(self, registry: ProviderRegistry):
+    def __init__(
+        self,
+        registry: ProviderRegistry,
+        circuit_breaker: Optional["CircuitBreaker"] = None,
+    ):
         self._registry = registry
+        self._circuit_breaker = circuit_breaker
         self._available_models = {m["model"] for m in registry.list_all_models()}
 
     def classify(self, prompt: str) -> str:
@@ -126,15 +134,23 @@ class SmartRouter:
 
         return "general"
 
+    def _is_circuit_healthy(self, model: str) -> bool:
+        """Check if the provider for a model has a healthy circuit."""
+        if not self._circuit_breaker:
+            return True
+        try:
+            provider_name = self._registry._model_to_provider.get(model)
+            if provider_name:
+                return self._circuit_breaker.can_execute(provider_name)
+        except Exception:
+            pass
+        return True
+
     def _find_available(self, tier_name: str) -> Optional[str]:
         tier_models = TIERS.get(tier_name, TIERS["budget"])
         for model in tier_models:
-            if model in self._available_models:
+            if model in self._available_models and self._is_circuit_healthy(model):
                 return model
-            # Fuzzy: check if any available model contains the tier model name
-            for avail in self._available_models:
-                if model.lower() in avail.lower():
-                    return avail
         return None
 
     def route(self, prompt: str) -> tuple[str, str, str]:
@@ -177,13 +193,19 @@ class SmartRouter:
         temperature: float = 0.7,
     ) -> dict:
         """Route, call cheap model, escalate if low quality."""
+        from aarnxen.core.retry import call_with_retry
+
         model, task_type, tier = self.route(prompt)
 
         provider, resolved_model = self._registry.resolve(model)
-        response = await provider.generate(
-            prompt, resolved_model,
+        fallbacks = self._registry.get_fallbacks(resolved_model)
+        response = await call_with_retry(
+            provider, resolved_model, prompt,
             system_prompt=system_prompt,
             temperature=temperature,
+            fallback_providers=fallbacks,
+            circuit_breaker=self._circuit_breaker,
+            max_retries=2,
         )
 
         escalated = False
@@ -204,10 +226,14 @@ class SmartRouter:
                 escalation_reason = "Initial response was low quality; escalated to premium tier."
 
                 provider, resolved_model = self._registry.resolve(premium_model)
-                response = await provider.generate(
-                    prompt, resolved_model,
+                fallbacks = self._registry.get_fallbacks(resolved_model)
+                response = await call_with_retry(
+                    provider, resolved_model, prompt,
                     system_prompt=system_prompt,
                     temperature=temperature,
+                    fallback_providers=fallbacks,
+                    circuit_breaker=self._circuit_breaker,
+                    max_retries=2,
                 )
                 escalated = True
 

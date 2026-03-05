@@ -40,3 +40,21 @@ def generation_failed(provider: str, model: str, error: str, alternatives: list 
         "recovery_hint": "Try again with model='auto' or specify a different model.",
         "available_alternatives": alternatives or [],
     }
+
+
+def validation_error(field: str, message: str):
+    return {
+        "isError": True,
+        "error_type": "validation_error",
+        "message": f"Invalid {field}: {message}",
+        "recovery_hint": f"Check the '{field}' parameter and try again.",
+    }
+
+
+def internal_error(tool: str, error: str):
+    return {
+        "isError": True,
+        "error_type": "internal_error",
+        "message": f"Internal error in {tool}: {error}",
+        "recovery_hint": "This is a server-side issue. Try again or use a different model.",
+    }

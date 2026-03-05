@@ -5,8 +5,8 @@ import logging
 from mcp.server.fastmcp import Context
 
 from aarnxen.core.errors import generation_failed, rate_limit_error
-from aarnxen.core.extractor import EntityExtractor
-from aarnxen.core.router import SmartRouter
+from aarnxen.core.retry import RetryError, call_with_retry
+from aarnxen.core.validation import validate_prompt, validate_temperature, sanitize_system_prompt, truncate_response
 
 logger = logging.getLogger("aarnxen")
 
@@ -31,31 +31,29 @@ async def chat_handler(
     cascade: bool = False,
     ctx: Context = None,
 ) -> dict:
-    """Chat with any AI model.
-
-    Args:
-        prompt: Your message or question.
-        model: Model name, provider name, or "auto". Examples: "gemini-2.5-flash", "groq", "auto".
-        temperature: Creativity (0.0=focused, 1.0=creative). Default 0.7.
-        system_prompt: Optional system instructions.
-        conversation_id: Continue a previous conversation by ID.
-        cascade: Smart routing with auto-escalation. Only works when model="auto".
-    """
+    """Chat with any AI model."""
     deps = ctx.request_context.lifespan_context
     registry = deps.registry
     cache = deps.cache
     cost_tracker = deps.cost_tracker
     memory = deps.memory
+    circuit_breaker = deps.circuit_breaker
+
+    prompt = validate_prompt(prompt)
+    temperature = validate_temperature(temperature)
+    if system_prompt:
+        system_prompt = sanitize_system_prompt(system_prompt)
 
     # Smart cascade mode: classify, route, escalate if needed
     if cascade and (not model or model == "auto"):
-        router = SmartRouter(registry)
+        router = deps.router
         try:
             result = await router.cascade(
                 prompt, system_prompt=system_prompt or None, temperature=temperature,
             )
-        except Exception as exc:
-            error_str = str(exc)
+        except (RetryError, Exception) as exc:
+            logger.warning("Cascade failed: %s", exc)
+            error_str = type(exc).__name__
             alts = [m["model"] for m in registry.list_all_models()[:5]]
             if "429" in error_str or "rate" in error_str.lower():
                 return rate_limit_error("auto (cascade)", alternatives=alts)
@@ -71,7 +69,7 @@ async def chat_handler(
             memory.add_message(conversation_id, "assistant", result["text"], result["model"], result["provider"])
 
         response = {
-            "response": result["text"],
+            "response": truncate_response(result["text"]),
             "model": result["model"],
             "provider": result["provider"],
             "cached": False,
@@ -94,23 +92,6 @@ async def chat_handler(
 
     provider, resolved_model = registry.resolve(model)
 
-    # Check cache
-    if cache:
-        cached = cache.get(provider.provider_name(), resolved_model, prompt, system_prompt, temperature)
-        if cached:
-            await _log(ctx, "debug", f"Cache hit for {resolved_model}")
-            cost_tracker.record(
-                provider.provider_name(), resolved_model,
-                cached.input_tokens, cached.output_tokens, cached=True,
-            )
-            return {
-                "response": cached.text,
-                "model": resolved_model,
-                "provider": provider.provider_name(),
-                "cached": True,
-                "tokens": {"input": cached.input_tokens, "output": cached.output_tokens},
-            }
-
     # Build context from conversation history
     full_prompt = prompt
     if conversation_id and memory:
@@ -119,15 +100,37 @@ async def chat_handler(
             context_lines = [f"[{m['role']}]: {m['content']}" for m in history[-10:]]
             full_prompt = "Previous conversation:\n" + "\n".join(context_lines) + f"\n\nNew message: {prompt}"
 
+    # Check cache
+    if cache:
+        cached = cache.get(provider.provider_name(), resolved_model, full_prompt, system_prompt, temperature)
+        if cached:
+            await _log(ctx, "debug", f"Cache hit for {resolved_model}")
+            cost_tracker.record(
+                provider.provider_name(), resolved_model,
+                cached.input_tokens, cached.output_tokens, cached=True,
+            )
+            return {
+                "response": truncate_response(cached.text),
+                "model": resolved_model,
+                "provider": provider.provider_name(),
+                "cached": True,
+                "tokens": {"input": cached.input_tokens, "output": cached.output_tokens},
+            }
+
     await _log(ctx, "info", f"Routing to {provider.provider_name()}/{resolved_model}")
     try:
-        response = await provider.generate(
-            full_prompt, resolved_model,
+        fallbacks = registry.get_fallbacks(resolved_model)
+        response = await call_with_retry(
+            provider, resolved_model, full_prompt,
             system_prompt=system_prompt or None,
             temperature=temperature,
+            fallback_providers=fallbacks,
+            circuit_breaker=circuit_breaker,
+            max_retries=2,
         )
-    except Exception as exc:
-        error_str = str(exc)
+    except (RetryError, Exception) as exc:
+        logger.warning("Generation failed: %s", exc)
+        error_str = type(exc).__name__
         alts = [m["model"] for m in registry.list_all_models()[:5]]
         if "429" in error_str or "rate" in error_str.lower():
             return rate_limit_error(provider.provider_name(), alternatives=alts)
@@ -136,21 +139,19 @@ async def chat_handler(
         )
     await _log(ctx, "info", f"Response: {len(response.text)} chars, {response.latency_ms:.0f}ms")
 
-    # Cache and track
     if cache:
-        cache.put(provider.provider_name(), resolved_model, prompt, system_prompt, temperature, response)
+        cache.put(provider.provider_name(), resolved_model, full_prompt, system_prompt, temperature, response)
     cost_entry = cost_tracker.record(
         provider.provider_name(), resolved_model,
         response.input_tokens, response.output_tokens,
     )
 
-    # Save to conversation memory
     if conversation_id and memory:
         memory.add_message(conversation_id, "user", prompt)
         memory.add_message(conversation_id, "assistant", response.text, resolved_model, provider.provider_name())
 
     result = {
-        "response": response.text,
+        "response": truncate_response(response.text),
         "model": resolved_model,
         "provider": provider.provider_name(),
         "cached": False,
@@ -166,10 +167,9 @@ async def chat_handler(
 def _auto_extract(deps, prompt: str):
     """Extract entities/relations from the prompt and store in the knowledge base."""
     try:
-        kb = getattr(deps, "knowledge", None)
-        if not kb:
+        extractor = deps.extractor
+        if not extractor:
             return
-        extractor = EntityExtractor(knowledge_base=kb)
         stats = extractor.extract_and_store(prompt)
         total = stats["entities_added"] + stats["relations_added"]
         if total > 0:

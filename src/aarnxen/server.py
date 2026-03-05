@@ -13,8 +13,10 @@ from aarnxen.core.cache import ResponseCache
 from aarnxen.core.circuit_breaker import CircuitBreaker
 from aarnxen.core.conversation import ConversationMemory
 from aarnxen.core.cost import CostTracker
+from aarnxen.core.events import EventBus
 from aarnxen.core.extractor import EntityExtractor
 from aarnxen.core.knowledge import KnowledgeBase
+from aarnxen.core.router import SmartRouter
 from aarnxen.providers.registry import ProviderRegistry
 
 logger = logging.getLogger("aarnxen")
@@ -29,6 +31,8 @@ class AppContext:
     knowledge: Optional[KnowledgeBase]
     circuit_breaker: CircuitBreaker
     extractor: EntityExtractor
+    router: SmartRouter
+    event_bus: EventBus
     config: AarnXenConfig
 
 
@@ -54,6 +58,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     knowledge = KnowledgeBase()
     circuit_breaker = CircuitBreaker()
     extractor = EntityExtractor(knowledge_base=knowledge)
+    router = SmartRouter(registry, circuit_breaker=circuit_breaker)
+    event_bus = EventBus()
 
     try:
         yield AppContext(
@@ -64,6 +70,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             knowledge=knowledge,
             circuit_breaker=circuit_breaker,
             extractor=extractor,
+            router=router,
+            event_bus=event_bus,
             config=cfg,
         )
     finally:
@@ -216,10 +224,11 @@ async def swarm(
     tasks: str,
     model: str = "auto",
     concurrency: int = 10,
+    max_budget_usd: float = 0.0,
     ctx: Context = None,
 ) -> dict:
-    """Launch multiple AI agents in parallel on different sub-tasks. Use when you need to break a complex problem into sub-tasks, get N independent analyses, or run parallel code reviews. Pass a JSON array of task objects with "prompt" and optional "model", "system_prompt", "label". Max 100 agents, default concurrency 10."""
-    return await swarm_handler(tasks, model, concurrency, ctx)
+    """Launch multiple AI agents in parallel on different sub-tasks. Use when you need to break a complex problem into sub-tasks, get N independent analyses, or run parallel code reviews. Pass a JSON array of task objects with "prompt" and optional "model", "system_prompt", "label". Max 100 agents, default concurrency 10. Set max_budget_usd to limit total spend (0.0 = unlimited); agents are cancelled once budget is exceeded and partial results are returned."""
+    return await swarm_handler(tasks, model, concurrency, max_budget_usd, ctx)
 
 
 @mcp.tool()
@@ -240,6 +249,45 @@ async def provider_health(ctx: Context = None) -> dict:
     """Show circuit breaker health status for all AI providers. Use to check which providers are healthy, degraded, or down."""
     deps = ctx.request_context.lifespan_context
     return deps.circuit_breaker.get_all_status()
+
+
+@mcp.tool()
+async def health(ctx: Context = None) -> dict:
+    """Server health check. Returns status of all subsystems (providers, cache, knowledge base, circuit breaker). Use to verify the server is operational."""
+    deps = ctx.request_context.lifespan_context
+
+    provider_count = len(deps.registry.list_all_models())
+    cb_status = deps.circuit_breaker.get_all_status()
+    if isinstance(cb_status, dict) and cb_status:
+        healthy_providers = sum(1 for s in cb_status.values() if s.get("state") == "CLOSED")
+    else:
+        healthy_providers = provider_count
+
+    kb_ok = False
+    try:
+        if deps.knowledge:
+            deps.knowledge.stats()
+            kb_ok = True
+    except Exception:
+        pass
+
+    cache_ok = deps.cache is not None
+
+    all_ok = healthy_providers > 0 and kb_ok
+    return {
+        "status": "healthy" if all_ok else "degraded",
+        "providers": {"total": provider_count, "healthy": healthy_providers},
+        "cache": {"enabled": cache_ok},
+        "knowledge_base": {"connected": kb_ok},
+        "circuit_breaker": cb_status,
+    }
+
+
+@mcp.tool()
+async def events(event_type: str = "", limit: int = 50, ctx: Context = None) -> dict:
+    """View recent system events (model failures, budget exceeded, circuit breaker trips). Filter by event_type."""
+    deps = ctx.request_context.lifespan_context
+    return {"events": deps.event_bus.get_history(event_type, limit)}
 
 
 @mcp.tool()
@@ -368,10 +416,19 @@ def models_resource() -> str:
 def config_resource() -> str:
     """Current AarnXen configuration (providers, cache, memory settings)."""
     from pathlib import Path
+    import json
     config_path = Path.home() / ".aarnxen" / "config.yaml"
-    if config_path.exists():
-        return config_path.read_text()
-    return "No config found at ~/.aarnxen/config.yaml"
+    if not config_path.exists():
+        return "No config found at ~/.aarnxen/config.yaml"
+    import yaml
+    raw = yaml.safe_load(config_path.read_text())
+    if raw and "providers" in raw:
+        for p in raw["providers"]:
+            if "api_key" in p:
+                p["api_key"] = "***REDACTED***"
+            if "api_key_env" in p:
+                p["api_key_env"] = p["api_key_env"]  # env var names are safe to show
+    return json.dumps(raw, indent=2, default=str)
 
 
 @mcp.resource("aarnxen://tiers")
