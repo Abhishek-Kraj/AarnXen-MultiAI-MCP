@@ -1,8 +1,13 @@
-"""Circuit breaker pattern for provider health tracking."""
+"""Circuit breaker pattern for provider health tracking.
 
+Uses asyncio.Lock for async-safe operation without blocking the event loop.
+Falls back to threading.Lock only for synchronous callers (e.g. get_all_status
+from non-async contexts).
+"""
+
+import asyncio
 import enum
 import logging
-import threading
 import time
 from dataclasses import dataclass, field
 
@@ -44,7 +49,7 @@ class CircuitBreaker:
         self._window = window_seconds
         self._cooldown = cooldown_seconds
         self._circuits: dict[str, _ProviderCircuit] = {}
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
 
     def _get_circuit(self, provider: str) -> _ProviderCircuit:
         if provider not in self._circuits:
@@ -55,30 +60,39 @@ class CircuitBreaker:
         cutoff = now - self._window
         circuit.failures = [t for t in circuit.failures if t > cutoff]
 
-    def can_execute(self, provider: str) -> bool:
-        with self._lock:
-            circuit = self._get_circuit(provider)
-            now = time.monotonic()
+    def _can_execute_inner(self, provider: str) -> bool:
+        """Lock-free core logic (caller must hold lock or be single-threaded)."""
+        circuit = self._get_circuit(provider)
+        now = time.monotonic()
 
-            if circuit.state is CircuitState.CLOSED:
-                return True
-
-            if circuit.state is CircuitState.OPEN:
-                elapsed = now - circuit.opened_at
-                if elapsed >= self._cooldown:
-                    circuit.state = CircuitState.HALF_OPEN
-                    logger.info(
-                        "Circuit for %s transitioned to HALF_OPEN after %.1fs cooldown",
-                        provider, elapsed,
-                    )
-                    return True
-                return False
-
-            # HALF_OPEN — allow the single probe request
+        if circuit.state is CircuitState.CLOSED:
             return True
 
-    def record_success(self, provider: str) -> None:
-        with self._lock:
+        if circuit.state is CircuitState.OPEN:
+            elapsed = now - circuit.opened_at
+            if elapsed >= self._cooldown:
+                circuit.state = CircuitState.HALF_OPEN
+                logger.info(
+                    "Circuit for %s transitioned to HALF_OPEN after %.1fs cooldown",
+                    provider, elapsed,
+                )
+                return True
+            return False
+
+        # HALF_OPEN — allow the single probe request
+        return True
+
+    def can_execute(self, provider: str) -> bool:
+        """Synchronous check (lock-free, safe for SmartRouter hot path)."""
+        return self._can_execute_inner(provider)
+
+    async def acan_execute(self, provider: str) -> bool:
+        """Async-safe check with lock."""
+        async with self._lock:
+            return self._can_execute_inner(provider)
+
+    async def record_success(self, provider: str) -> None:
+        async with self._lock:
             circuit = self._get_circuit(provider)
             circuit.success_count += 1
 
@@ -87,8 +101,8 @@ class CircuitBreaker:
                 circuit.failures.clear()
                 logger.info("Circuit for %s closed after successful probe", provider)
 
-    def record_failure(self, provider: str) -> None:
-        with self._lock:
+    async def record_failure(self, provider: str) -> None:
+        async with self._lock:
             circuit = self._get_circuit(provider)
             now = time.monotonic()
             circuit.total_failures += 1
@@ -114,38 +128,36 @@ class CircuitBreaker:
                 )
 
     def get_status(self, provider: str) -> dict:
-        with self._lock:
-            circuit = self._get_circuit(provider)
-            now = time.monotonic()
-            self._prune_old_failures(circuit, now)
+        circuit = self._get_circuit(provider)
+        now = time.monotonic()
+        self._prune_old_failures(circuit, now)
 
-            result = {
+        result = {
+            "state": circuit.state.value,
+            "failures_in_window": len(circuit.failures),
+            "total_failures": circuit.total_failures,
+            "success_count": circuit.success_count,
+        }
+
+        if circuit.state is CircuitState.OPEN:
+            elapsed = now - circuit.opened_at
+            result["retry_after"] = round(max(self._cooldown - elapsed, 0), 1)
+
+        return result
+
+    def get_all_status(self) -> dict:
+        now = time.monotonic()
+        dashboard: dict[str, dict] = {}
+        for name, circuit in self._circuits.items():
+            self._prune_old_failures(circuit, now)
+            entry = {
                 "state": circuit.state.value,
                 "failures_in_window": len(circuit.failures),
                 "total_failures": circuit.total_failures,
                 "success_count": circuit.success_count,
             }
-
             if circuit.state is CircuitState.OPEN:
                 elapsed = now - circuit.opened_at
-                result["retry_after"] = round(max(self._cooldown - elapsed, 0), 1)
-
-            return result
-
-    def get_all_status(self) -> dict:
-        with self._lock:
-            now = time.monotonic()
-            dashboard: dict[str, dict] = {}
-            for name, circuit in self._circuits.items():
-                self._prune_old_failures(circuit, now)
-                entry = {
-                    "state": circuit.state.value,
-                    "failures_in_window": len(circuit.failures),
-                    "total_failures": circuit.total_failures,
-                    "success_count": circuit.success_count,
-                }
-                if circuit.state is CircuitState.OPEN:
-                    elapsed = now - circuit.opened_at
-                    entry["retry_after"] = round(max(self._cooldown - elapsed, 0), 1)
-                dashboard[name] = entry
-            return dashboard
+                entry["retry_after"] = round(max(self._cooldown - elapsed, 0), 1)
+            dashboard[name] = entry
+        return dashboard

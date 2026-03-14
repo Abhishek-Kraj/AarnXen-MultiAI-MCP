@@ -63,18 +63,28 @@ async def chat_handler(
             result["provider"], result["model"],
             result["input_tokens"], result["output_tokens"],
         )
+        # Track the initial (cheap) call's cost when escalation occurred
+        initial_cost = 0.0
+        if result.get("escalated") and result.get("initial_response"):
+            ir = result["initial_response"]
+            initial_entry = cost_tracker.record(
+                ir.get("provider", "unknown"), ir.get("model", "unknown"),
+                ir.get("input_tokens", 0), ir.get("output_tokens", 0),
+            )
+            initial_cost = initial_entry.cost_usd
 
         if conversation_id and memory:
             memory.add_message(conversation_id, "user", prompt)
             memory.add_message(conversation_id, "assistant", result["text"], result["model"], result["provider"])
 
+        total_cost = cost_entry.cost_usd + initial_cost
         response = {
             "response": truncate_response(result["text"]),
             "model": result["model"],
             "provider": result["provider"],
             "cached": False,
             "tokens": {"input": result["input_tokens"], "output": result["output_tokens"]},
-            "cost_usd": round(cost_entry.cost_usd, 6),
+            "cost_usd": round(total_cost, 6),
             "latency_ms": round(result["latency_ms"], 1),
             "smart_routing": {
                 "task_type": result["task_type"],

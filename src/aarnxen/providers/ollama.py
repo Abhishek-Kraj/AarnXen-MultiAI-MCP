@@ -6,6 +6,7 @@ startup. Cloud pricing is subscription-based ($0/20/100 per month), NOT
 per-token — effectively free per request.
 """
 
+import asyncio
 import logging
 import time
 from typing import Optional
@@ -81,6 +82,9 @@ class OllamaProvider(BaseProvider):
             headers=headers,
         )
 
+    # Transient errors worth retrying (network blips, server overload)
+    _RETRYABLE = (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)
+
     async def generate(
         self,
         prompt: str,
@@ -114,9 +118,33 @@ class OllamaProvider(BaseProvider):
         if max_tokens:
             body["options"]["num_predict"] = max_tokens
 
-        resp = await self._client.post("/api/chat", json=body)
-        resp.raise_for_status()
-        data = resp.json()
+        last_err = None
+        for attempt in range(3):
+            try:
+                resp = await self._client.post("/api/chat", json=body)
+                # Retry on 502/503/504 (server overloaded)
+                if resp.status_code in (502, 503, 504) and attempt < 2:
+                    logger.warning(
+                        "Ollama %s returned %d, retrying (%d/3)",
+                        model, resp.status_code, attempt + 1,
+                    )
+                    await asyncio.sleep(1.5 * (attempt + 1))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                break
+            except self._RETRYABLE as e:
+                last_err = e
+                if attempt < 2:
+                    logger.warning(
+                        "Ollama %s transient error: %s, retrying (%d/3)",
+                        model, type(e).__name__, attempt + 1,
+                    )
+                    await asyncio.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
+        else:
+            raise last_err or RuntimeError(f"Ollama {model} failed after 3 attempts")
 
         elapsed = (time.monotonic() - start) * 1000
 

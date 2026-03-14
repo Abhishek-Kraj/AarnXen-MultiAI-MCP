@@ -278,6 +278,9 @@ class SmartRouter:
                     "text": response.text,
                     "model": resolved_model,
                     "provider": provider.provider_name(),
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "latency_ms": response.latency_ms,
                 }
                 escalation_reason = "Initial response was low quality; escalated to premium tier."
 
@@ -308,5 +311,12 @@ class SmartRouter:
         if escalated:
             result["escalation_reason"] = escalation_reason
             result["initial_response"] = initial_response
+            # Include the initial call's token usage for accurate cost tracking
+            result["total_input_tokens"] = (
+                response.input_tokens + (initial_response or {}).get("input_tokens", 0)
+            )
+            result["total_output_tokens"] = (
+                response.output_tokens + (initial_response or {}).get("output_tokens", 0)
+            )
 
         return result

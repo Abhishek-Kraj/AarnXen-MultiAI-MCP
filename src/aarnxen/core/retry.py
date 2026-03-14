@@ -45,12 +45,12 @@ async def call_with_retry(
             try:
                 result = await provider.generate(prompt, model, **kwargs)
                 if circuit_breaker:
-                    circuit_breaker.record_success(primary_name)
+                    await circuit_breaker.record_success(primary_name)
                 return result
             except Exception as e:
                 errors.append(e)
                 if circuit_breaker:
-                    circuit_breaker.record_failure(primary_name)
+                    await circuit_breaker.record_failure(primary_name)
                 if attempt < max_retries - 1:
                     delay = min(base_delay * (2**attempt), max_delay) * (0.5 + random.random())
                     logger.warning(
@@ -68,11 +68,11 @@ async def call_with_retry(
             logger.info("Falling back to %s/%s", fb_name, fb_model)
             result = await fb_provider.generate(prompt, fb_model, **kwargs)
             if circuit_breaker:
-                circuit_breaker.record_success(fb_name)
+                await circuit_breaker.record_success(fb_name)
             return result
         except Exception as e:
             errors.append(e)
             if circuit_breaker:
-                circuit_breaker.record_failure(fb_name)
+                await circuit_breaker.record_failure(fb_name)
 
     raise RetryError(f"All {len(errors)} attempts failed", errors)

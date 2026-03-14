@@ -4,6 +4,7 @@ Wraps tool handlers with cross-cutting concerns so individual handlers
 stay focused on business logic.
 """
 
+import json
 import logging
 import time
 from functools import wraps
@@ -13,6 +14,10 @@ from aarnxen.core.guardrails import Guardrails
 from aarnxen.core.rate_limit import RateLimiter, RateLimitExceeded
 
 logger = logging.getLogger(__name__)
+
+# MCP tool responses should stay under this limit to avoid truncation
+# by the Claude client. 100K chars ≈ ~25K tokens.
+MAX_RESPONSE_CHARS = 100_000
 
 
 def tool_wrapper(handler: Callable, tool_name: str) -> Callable:
@@ -91,6 +96,52 @@ def tool_wrapper(handler: Callable, tool_name: str) -> Callable:
             except Exception as exc:
                 logger.debug("Auto-learn failed for %s: %s", tool_name, exc)
 
+        # 7. Truncate oversized responses to stay within MCP limits
+        result = _truncate_response(result, tool_name)
+
         return result
 
     return wrapped
+
+
+def _truncate_response(result, tool_name: str, max_chars: int = MAX_RESPONSE_CHARS):
+    """Truncate oversized responses to keep MCP payloads manageable."""
+    if not isinstance(result, dict):
+        return result
+
+    try:
+        serialized = json.dumps(result, default=str)
+    except (TypeError, ValueError):
+        return result
+
+    if len(serialized) <= max_chars:
+        return result
+
+    logger.warning(
+        "%s response is %d chars (limit %d), truncating text fields",
+        tool_name, len(serialized), max_chars,
+    )
+
+    # Truncate the largest text fields first
+    for key in ("text", "content", "response", "transcript"):
+        if key in result and isinstance(result[key], str) and len(result[key]) > 5000:
+            excess = len(serialized) - max_chars
+            trim = min(len(result[key]) - 2000, excess + 500)
+            result[key] = result[key][: len(result[key]) - trim] + f"\n\n... [truncated {trim} chars]"
+            result["_truncated"] = True
+            serialized = json.dumps(result, default=str)
+            if len(serialized) <= max_chars:
+                return result
+
+    # If still too large, truncate nested lists (e.g., debate rounds, swarm results)
+    for key in ("responses", "rounds", "results", "jurors", "history"):
+        if key in result and isinstance(result[key], list) and len(result[key]) > 3:
+            original_len = len(result[key])
+            result[key] = result[key][:3]
+            result[key].append({"_note": f"Truncated: showing 3 of {original_len} items"})
+            result["_truncated"] = True
+            serialized = json.dumps(result, default=str)
+            if len(serialized) <= max_chars:
+                return result
+
+    return result

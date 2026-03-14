@@ -1,7 +1,7 @@
 {
-  "name": "aarnxen-memory",
+  "name": "aarnxen-multiai-mcp",
   "version": "1.0.0",
-  "description": "Auto-memory system for AarnXen Multi-AI MCP — automatically captures session observations, decisions, and discoveries into the knowledge base",
+  "description": "Multi-AI orchestration MCP server with 25+ models, smart routing, adversarial debate, consensus, and persistent knowledge base. Registers as 'ax'.",
   "author": {
     "name": "Abhishek"
   },

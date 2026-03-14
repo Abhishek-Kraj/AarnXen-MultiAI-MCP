@@ -99,11 +99,11 @@ class GeminiProvider(BaseProvider):
         return "gemini"
 
     async def health_check(self) -> bool:
+        """Lightweight health check — counts tokens instead of generating content."""
         try:
-            await self._client.aio.models.generate_content(
+            await self._client.aio.models.count_tokens(
                 model=self._models[0],
-                contents="ping",
-                config=types.GenerateContentConfig(max_output_tokens=5),
+                contents="health check",
             )
             return True
         except Exception:
