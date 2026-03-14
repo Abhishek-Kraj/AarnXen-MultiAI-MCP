@@ -1,4 +1,5 @@
 """Input/output guardrails: PII detection, prompt injection scoring, content policy."""
+from __future__ import annotations
 
 import base64
 import math

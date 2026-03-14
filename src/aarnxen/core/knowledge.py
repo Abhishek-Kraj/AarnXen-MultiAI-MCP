@@ -4,6 +4,7 @@ Stores documents, notes, facts, and code snippets that models can search
 and reference across sessions. No external vector DB needed — uses SQLite's
 built-in FTS5 for ranked text search.
 """
+from __future__ import annotations
 
 import math
 import sqlite3

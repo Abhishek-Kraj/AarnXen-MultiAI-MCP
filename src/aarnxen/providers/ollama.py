@@ -5,6 +5,7 @@ Kimi, GLM, MiniMax and more. Models are auto-discovered via /api/tags at
 startup. Cloud pricing is subscription-based ($0/20/100 per month), NOT
 per-token — effectively free per request.
 """
+from __future__ import annotations
 
 import asyncio
 import logging

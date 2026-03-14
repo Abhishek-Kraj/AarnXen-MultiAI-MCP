@@ -1,4 +1,5 @@
 """Per-model pricing data (USD per 1M tokens)."""
+from __future__ import annotations
 
 # (input_price_per_million, output_price_per_million)
 PRICING: dict[tuple[str, str], tuple[float, float]] = {

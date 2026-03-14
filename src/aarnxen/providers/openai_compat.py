@@ -1,4 +1,5 @@
 """OpenAI-compatible provider — works with OpenAI, Groq, OpenRouter, vLLM, LM Studio, etc."""
+from __future__ import annotations
 
 import time
 from typing import Optional

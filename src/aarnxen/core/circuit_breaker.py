@@ -4,6 +4,7 @@ Uses asyncio.Lock for async-safe operation without blocking the event loop.
 Falls back to threading.Lock only for synchronous callers (e.g. get_all_status
 from non-async contexts).
 """
+from __future__ import annotations
 
 import asyncio
 import enum

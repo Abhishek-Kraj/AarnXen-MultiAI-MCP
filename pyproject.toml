@@ -2,7 +2,7 @@
 name = "aarnxen-multiai-mcp"
 version = "0.1.0"
 description = "Multi-AI MCP server with parallel consensus, caching, and cost tracking"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Abhishek", email = "abhishek@aarnxen.dev" }]
 dependencies = [

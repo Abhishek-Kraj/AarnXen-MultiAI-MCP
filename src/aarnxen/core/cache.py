@@ -1,4 +1,5 @@
 """TTL + LRU response cache with optional semantic similarity."""
+from __future__ import annotations
 
 import copy
 import hashlib

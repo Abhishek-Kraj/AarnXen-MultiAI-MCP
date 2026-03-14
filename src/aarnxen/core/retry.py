@@ -1,4 +1,5 @@
 """Retry with exponential backoff and provider fallback."""
+from __future__ import annotations
 
 import asyncio
 import logging
